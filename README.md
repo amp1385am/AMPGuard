@@ -1,15 +1,20 @@
-# AMPGuard
+# AMPGuard 🛡
 
-Modern Web Application Pentesting Framework
+AMPGuard is a lightweight Web Pentest Scanner built with Python and PySide6.
 
 ## Features
 
-- GUI Dashboard
-- Multi Target Scan
-- SQLite Storage
-- HTML/PDF/CSV Reports
-- Vulnerability Analytics
+- Recursive crawler
+- SQL Injection detection
+- Reflected XSS detection
+- Security header analysis
+- Directory brute-force
+- Interactive Dashboard
+- Vulnerability severity chart
+- Report generation
+- Multi-target scanning
 
-## Status
-
-Alpha Release
+## Installation
+```bash
+pip install -r requirements.txt
+python main.py
