@@ -7,18 +7,56 @@ class WebScanner:
 
     def __init__(self, target):
 
+        self.base_target = target
         self.target = target
 
+        self.session = requests.Session()
+
         self.vulnerabilities = []
+        self.vuln_set = set()
 
         self.visited_urls = set()
-
         self.urls_to_scan = set()
 
         self.urls_to_scan.add(target)
 
         self.max_depth = 2
+        self.max_urls = 50
 
+    # =====================================================
+    # SAFE REQUEST
+    # =====================================================
+
+    def safe_get(self, url):
+
+        try:
+            return self.session.get(url, timeout=5)
+        except:
+            return None
+
+    # =====================================================
+    # ADD VULNERABILITY
+    # =====================================================
+
+    def add_vuln(self, vuln_type, url, severity, log_callback):
+
+        key = f"{vuln_type}:{url}"
+
+        if key in self.vuln_set:
+            return
+
+        self.vuln_set.add(key)
+
+        vuln = {
+            "type": vuln_type,
+            "url": url,
+            "severity": severity
+        }
+
+        self.vulnerabilities.append(vuln)
+
+        if log_callback:
+            log_callback(f"[VULN] {vuln_type} -> {url}")
 
     # =====================================================
     # MAIN SCAN
@@ -29,178 +67,119 @@ class WebScanner:
         if log_callback:
             log_callback("[INFO] Starting crawler...")
 
-        # =========================
-        # Crawl Target
-        # =========================
-
-        self.crawl(self.target, log_callback)
-
-        # =========================
-        # Scan All URLs
-        # =========================
+        self.crawl(self.base_target, log_callback)
 
         all_urls = list(self.urls_to_scan)
 
-        for url in all_urls:
+        if log_callback:
+            log_callback(f"[INFO] URLs collected: {len(all_urls)}")
 
-            if log_callback:
-                log_callback(f"[SCAN] Scanning: {url}")
+        for url in all_urls:
 
             self.target = url
 
+            if log_callback:
+                log_callback(f"[SCAN] {url}")
+
             self.check_headers(log_callback)
-
             self.check_xss(log_callback)
-
             self.check_sqli(log_callback)
 
-            # =========================
-            # Directory Bruteforce
-            # =========================
-
-            self.directory_bruteforce(
-                log_callback
-            )
+        # directory brute force only once
+        self.target = self.base_target
+        self.directory_bruteforce(log_callback)
 
         return self.vulnerabilities
 
     # =====================================================
-    # HEADER CHECK
+    # HEADERS
     # =====================================================
 
     def check_headers(self, log_callback):
 
-        try:
+        response = self.safe_get(self.target)
 
-            response = requests.get(
-                self.target,
-                timeout=10
-            )
+        if not response:
+            return
 
-            headers = response.headers
+        security_headers = [
+            "Content-Security-Policy",
+            "X-Frame-Options",
+            "Strict-Transport-Security"
+        ]
 
-            security_headers = [
+        for header in security_headers:
 
-                "Content-Security-Policy",
-                "X-Frame-Options",
-                "Strict-Transport-Security"
+            if header not in response.headers:
 
-            ]
-
-            for header in security_headers:
-
-                if header not in headers:
-
-                    vuln = {
-                        "type": "Missing Security Header",
-                        "url": self.target,
-                        "severity": "Medium"
-                    }
-
-                    self.vulnerabilities.append(vuln)
-
-                    if log_callback:
-                        log_callback(
-                            f"[WARNING] Missing header: {header}"
-                        )
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(f"[ERROR] Header scan failed: {e}")
+                self.add_vuln(
+                    "Missing Security Header",
+                    self.target,
+                    "Medium",
+                    log_callback
+                )
 
     # =====================================================
-    # XSS CHECK
+    # XSS
     # =====================================================
 
     def check_xss(self, log_callback):
 
         payload = "<script>alert(1)</script>"
 
-        test_url = f"{self.target}?q={payload}"
+        test_url = f"{self.target}?q=test"
 
-        try:
+        response = self.safe_get(test_url)
 
-            response = requests.get(
+        if not response:
+            return
+
+        if payload in response.text:
+
+            self.add_vuln(
+                "Reflected XSS",
                 test_url,
-                timeout=10
+                "High",
+                log_callback
             )
 
-            if payload in response.text:
-
-                vuln = {
-                    "type": "Reflected XSS",
-                    "url": test_url,
-                    "severity": "High"
-                }
-
-                self.vulnerabilities.append(vuln)
-
-                if log_callback:
-                    log_callback(
-                        "[CRITICAL] XSS vulnerability detected!"
-                    )
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(f"[ERROR] XSS scan failed: {e}")
-
     # =====================================================
-    # SQLi CHECK
+    # SQLI
     # =====================================================
 
     def check_sqli(self, log_callback):
 
-        payload = "'"
-
-        test_url = f"{self.target}?id={payload}"
+        test_url = f"{self.target}?id=1'"
 
         sql_errors = [
-
             "mysql",
             "syntax error",
             "sql",
-            "database error",
-            "mysqli"
-
+            "database error"
         ]
 
-        try:
+        response = self.safe_get(test_url)
 
-            response = requests.get(
-                test_url,
-                timeout=10
-            )
+        if not response:
+            return
 
-            response_text = response.text.lower()
+        text = response.text.lower()
 
-            for error in sql_errors:
+        for err in sql_errors:
 
-                if error in response_text:
+            if err in text:
 
-                    vuln = {
-                        "type": "SQL Injection",
-                        "url": test_url,
-                        "severity": "Critical"
-                    }
+                self.add_vuln(
+                    "SQL Injection",
+                    test_url,
+                    "Critical",
+                    log_callback
+                )
 
-                    self.vulnerabilities.append(vuln)
-
-                    if log_callback:
-                        log_callback(
-                            "[CRITICAL] SQL Injection detected!"
-                        )
-
-                    break
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(f"[ERROR] SQLi scan failed: {e}")
+                break
 
     # =====================================================
-    # RECURSIVE CRAWLER
+    # CRAWLER
     # =====================================================
 
     def crawl(self, url, log_callback, depth=0):
@@ -208,89 +187,56 @@ class WebScanner:
         if depth > self.max_depth:
             return
 
-        try:
+        if len(self.urls_to_scan) >= self.max_urls:
+            return
 
-            if url in self.visited_urls:
-                return
+        if url in self.visited_urls:
+            return
 
-            self.visited_urls.add(url)
+        self.visited_urls.add(url)
 
-            if log_callback:
-                log_callback(
-                    f"[CRAWLER] Depth {depth} -> {url}"
-                )
+        if log_callback:
+            log_callback(f"[CRAWLER] {url}")
 
-            response = requests.get(
-                url,
-                timeout=10
-            )
+        response = self.safe_get(url)
 
-            soup = BeautifulSoup(
-                response.text,
-                "html.parser"
-            )
+        if not response:
+            return
 
-            # =========================
-            # FIND LINKS
-            # =========================
+        soup = BeautifulSoup(response.text, "html.parser")
 
-            links = soup.find_all("a")
+        links = soup.find_all("a")
 
-            for link in links:
+        for link in links:
 
-                href = link.get("href")
+            href = link.get("href")
 
-                if not href:
-                    continue
+            if not href:
+                continue
 
-                absolute_url = urljoin(url, href)
+            absolute = urljoin(url, href)
 
-                parsed_target = urlparse(self.target)
-                parsed_link = urlparse(absolute_url)
+            parsed_root = urlparse(self.base_target)
+            parsed_link = urlparse(absolute)
 
-                # Same Domain Only
+            if parsed_root.netloc != parsed_link.netloc:
+                continue
 
-                if parsed_target.netloc != parsed_link.netloc:
-                    continue
+            clean_url = parsed_link.scheme + "://" + parsed_link.netloc + parsed_link.path
 
-                if absolute_url not in self.visited_urls:
+            if clean_url not in self.visited_urls:
 
-                    self.urls_to_scan.add(
-                        absolute_url
-                    )
+                self.urls_to_scan.add(clean_url)
 
-                    if log_callback:
-                        log_callback(
-                            f"[FOUND] {absolute_url}"
-                        )
+                if log_callback:
+                    log_callback(f"[FOUND] {clean_url}")
 
-                    # Recursive Crawl
+                self.crawl(clean_url, log_callback, depth + 1)
 
-                    self.crawl(
-                        absolute_url,
-                        log_callback,
-                        depth + 1
-                    )
-
-            # =========================
-            # FIND FORMS
-            # =========================
-
-            self.extract_forms(
-                url,
-                soup,
-                log_callback
-            )
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(
-                    f"[ERROR] Crawl failed: {e}"
-                )
+        self.extract_forms(url, soup, log_callback)
 
     # =====================================================
-    # FORM EXTRACTION
+    # FORMS
     # =====================================================
 
     def extract_forms(self, url, soup, log_callback):
@@ -300,42 +246,31 @@ class WebScanner:
         for form in forms:
 
             action = form.get("action")
+            method = form.get("method", "get").lower()
 
-            method = form.get(
-                "method",
-                "get"
-            ).lower()
+            inputs = []
 
-            inputs = form.find_all("input")
+            for inp in form.find_all("input"):
 
-            input_names = []
-
-            for input_tag in inputs:
-
-                name = input_tag.get("name")
+                name = inp.get("name")
 
                 if name:
-                    input_names.append(name)
+                    inputs.append(name)
 
             form_info = {
                 "url": url,
                 "action": action,
                 "method": method,
-                "inputs": input_names
+                "inputs": inputs
             }
 
             if log_callback:
-                log_callback(
-                    f"[FORM] {method.upper()} -> "
-                    f"{action} | Inputs: {input_names}"
-                )
-        self.test_forms_xss(
-            form_info,
-            log_callback
-        )
+                log_callback(f"[FORM] {action}")
+
+            self.test_forms_xss(form_info, log_callback)
 
     # =====================================================
-    # FORM XSS TEST
+    # FORM XSS
     # =====================================================
 
     def test_forms_xss(self, form_info, log_callback):
@@ -344,54 +279,43 @@ class WebScanner:
 
         target_url = urljoin(
             form_info["url"],
-            form_info["action"]
+            form_info["action"] or ""
         )
 
         data = {}
 
-        for input_name in form_info["inputs"]:
-            data[input_name] = payload
+        for name in form_info["inputs"]:
+            data[name] = payload
 
         try:
 
             if form_info["method"] == "post":
 
-                response = requests.post(
+                response = self.session.post(
                     target_url,
                     data=data,
-                    timeout=10
+                    timeout=5
                 )
 
             else:
 
-                response = requests.get(
+                response = self.session.get(
                     target_url,
                     params=data,
-                    timeout=10
+                    timeout=5
                 )
 
             if payload in response.text:
 
-                vuln = {
-                    "type": "Form XSS",
-                    "url": target_url,
-                    "severity": "High"
-                }
-
-                self.vulnerabilities.append(vuln)
-
-                if log_callback:
-                    log_callback(
-                        f"[CRITICAL] Form XSS detected: "
-                        f"{target_url}"
-                    )
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(
-                    f"[ERROR] Form XSS failed: {e}"
+                self.add_vuln(
+                    "Form XSS",
+                    target_url,
+                    "High",
+                    log_callback
                 )
+
+        except:
+            pass
 
     # =====================================================
     # DIRECTORY BRUTEFORCE
@@ -402,56 +326,28 @@ class WebScanner:
         wordlist_path = "wordlists/common.txt"
 
         if not os.path.exists(wordlist_path):
-
-            if log_callback:
-                log_callback(
-                    "[ERROR] Wordlist not found."
-                )
-
             return
 
-        try:
+        if log_callback:
+            log_callback("[INFO] Directory scan started")
 
-            with open(wordlist_path, "r") as f:
+        with open(wordlist_path, "r", encoding="utf-8", errors="ignore") as f:
+            paths = f.read().splitlines()[:100]
 
-                paths = f.read().splitlines()
+        for path in paths:
 
-            for path in paths:
+            url = urljoin(self.base_target + "/", path)
 
-                url = urljoin(
-                    self.target + "/",
-                    path
-                )
+            response = self.safe_get(url)
 
-                try:
+            if not response:
+                continue
 
-                    response = requests.get(
-                        url,
-                        timeout=5
-                    )
+            if response.status_code in [200, 301, 302, 403]:
 
-                    if response.status_code in [200, 301, 302, 403]:
-
-                        vuln = {
-                            "type": "Interesting Endpoint",
-                            "url": url,
-                            "severity": "Low"
-                        }
-
-                        self.vulnerabilities.append(vuln)
-
-                        if log_callback:
-                            log_callback(
-                                f"[FOUND] {url} "
-                                f"({response.status_code})"
-                            )
-
-                except:
-                    pass
-
-        except Exception as e:
-
-            if log_callback:
-                log_callback(
-                    f"[ERROR] Directory scan failed: {e}"
+                self.add_vuln(
+                    "Interesting Endpoint",
+                    url,
+                    "Low",
+                    log_callback
                 )

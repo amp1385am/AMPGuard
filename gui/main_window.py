@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import Qt
-from PySide6.QtCore import QPropertyAnimation,  QEasingCurve
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve
 
 from PySide6.QtGui import QColor
 
@@ -79,7 +79,6 @@ class ChartWidget(FigureCanvas):
             severity = vuln["severity"]
 
             if severity in severity_counts:
-
                 severity_counts[severity] += 1
 
         labels = []
@@ -88,12 +87,10 @@ class ChartWidget(FigureCanvas):
         for key, value in severity_counts.items():
 
             if value > 0:
-
                 labels.append(key)
                 values.append(value)
 
         if values:
-
             self.ax.pie(
                 values,
                 labels=labels,
@@ -169,7 +166,7 @@ class MainWindow(QMainWindow):
                 color: white;
 
                 border: none;
-                
+
                 outline: 0;
 
                 font-size: 16px;
@@ -185,15 +182,15 @@ class MainWindow(QMainWindow):
             }
 
             QListWidget::item:selected {
-        
+
                 background-color: #00ff99;
-            
+
                 color: black;
-            
+
                 border-radius: 8px;
-            
+
                 font-weight: bold;
-            
+
                 padding-left: 12px;
             }
 
@@ -202,7 +199,7 @@ class MainWindow(QMainWindow):
                 background-color: #222;
 
                 color: #00ff99;
-                
+
                 border-radius: 8px;
             }
 
@@ -533,8 +530,6 @@ class MainWindow(QMainWindow):
         # ADD TO MAIN LAYOUT
         # =====================================================
 
-
-
         main_layout.addWidget(
             self.pages
         )
@@ -606,7 +601,6 @@ class MainWindow(QMainWindow):
         target = self.url_input.text()
 
         if not target:
-
             self.terminal.append(
                 "[ERROR] Please enter target URL."
             )
@@ -697,8 +691,8 @@ class MainWindow(QMainWindow):
     def filter_vulnerabilities(self):
 
         if not hasattr(
-            self,
-            "current_vulnerabilities"
+                self,
+                "current_vulnerabilities"
         ):
             return
 
@@ -722,26 +716,25 @@ class MainWindow(QMainWindow):
 
             search_match = (
 
-                search_text in vuln_type
+                    search_text in vuln_type
 
-                or
+                    or
 
-                search_text in vuln_url
+                    search_text in vuln_url
 
             )
 
             severity_match = (
 
-                severity_filter == "All"
+                    severity_filter == "All"
 
-                or
+                    or
 
-                vuln_severity == severity_filter
+                    vuln_severity == severity_filter
 
             )
 
             if search_match and severity_match:
-
                 filtered.append(vuln)
 
         self.fill_vulnerability_table(
@@ -753,8 +746,8 @@ class MainWindow(QMainWindow):
     # =====================================================
 
     def fill_vulnerability_table(
-        self,
-        vulnerabilities
+            self,
+            vulnerabilities
     ):
 
         self.vuln_table.setRowCount(
@@ -872,7 +865,6 @@ class MainWindow(QMainWindow):
         )
 
         for vuln in vulnerabilities:
-
             self.db.save_vulnerability(
                 scan_id,
                 vuln["type"],
@@ -975,12 +967,9 @@ class MainWindow(QMainWindow):
 
         card = QFrame()
 
-
-
         layout = QVBoxLayout()
 
         title_label = QLabel(title)
-
 
         value_label = QLabel(value)
 
@@ -1021,7 +1010,6 @@ class MainWindow(QMainWindow):
         )
 
         for row, scan in enumerate(scans):
-
             scan_id = str(scan[0])
 
             target = scan[1]
@@ -1125,4 +1113,5 @@ class MainWindow(QMainWindow):
             f"[SYSTEM] Theme changed to {theme_name}"
         )
 
-APP_VERSION = "1.0.0"
+
+APP_VERSION = "0.1.1"
