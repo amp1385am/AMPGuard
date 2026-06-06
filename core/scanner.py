@@ -23,6 +23,8 @@ class WebScanner:
         self.max_depth = 2
         self.max_urls = 50
 
+        self.vuln_callback = None
+
     # =====================================================
     # SAFE REQUEST
     # =====================================================
@@ -30,15 +32,39 @@ class WebScanner:
     def safe_get(self, url):
 
         try:
-            return self.session.get(url, timeout=5)
-        except:
+
+            response = self.session.get(
+                url,
+                timeout=5
+            )
+
+            print(
+                f"[HTTP] {url} -> "
+                f"{response.status_code}"
+            )
+
+            return response
+
+        except Exception as e:
+
+            print(
+                f"[HTTP ERROR] {url} -> {e}"
+            )
+
             return None
 
     # =====================================================
     # ADD VULNERABILITY
     # =====================================================
 
-    def add_vuln(self, vuln_type, url, severity, log_callback):
+    def add_vuln(
+            self,
+            vuln_type,
+            url,
+            severity,
+            log_callback,
+            vuln_callback=None
+    ):
 
         key = f"{vuln_type}:{url}"
 
@@ -54,6 +80,9 @@ class WebScanner:
         }
 
         self.vulnerabilities.append(vuln)
+
+        if self.vuln_callback:
+            self.vuln_callback(vuln)
 
         if log_callback:
             log_callback(f"[VULN] {vuln_type} -> {url}")
@@ -109,6 +138,12 @@ class WebScanner:
         ]
 
         for header in security_headers:
+
+            if log_callback:
+                log_callback(
+                    f"[HEADER] {header} => "
+                    f"{response.headers.get(header)}"
+                )
 
             if header not in response.headers:
 
@@ -206,6 +241,11 @@ class WebScanner:
         soup = BeautifulSoup(response.text, "html.parser")
 
         links = soup.find_all("a")
+
+        if log_callback:
+            log_callback(
+                f"[DEBUG] Found {len(links)} links on {url}"
+            )
 
         for link in links:
 

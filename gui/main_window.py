@@ -116,6 +116,8 @@ class MainWindow(QMainWindow):
 
         self.db = DatabaseManager()
 
+        self.workers = []
+
         self.setWindowTitle("AMPGuard")
 
         self.resize(1400, 800)
@@ -576,7 +578,6 @@ class MainWindow(QMainWindow):
 
         self.sidebar_expanded = True
 
-        self.theme_selector.addItem("Hacker Neon")
 
         self.apply_theme_button = QPushButton(
             "Apply Theme"
@@ -609,6 +610,8 @@ class MainWindow(QMainWindow):
 
         self.terminal.clear()
 
+        self.vuln_table.setRowCount(0)
+
         self.progress.setValue(0)
 
         self.start_button.setEnabled(False)
@@ -617,6 +620,10 @@ class MainWindow(QMainWindow):
 
         self.worker.log_signal.connect(
             self.update_terminal
+        )
+
+        self.worker.vuln_found_signal.connect(
+            self.add_vuln_live
         )
 
         self.worker.progress_signal.connect(
@@ -653,6 +660,8 @@ class MainWindow(QMainWindow):
             )
 
             worker = ScanWorker(target)
+
+            self.workers.append(worker)
 
             worker.log_signal.connect(
                 self.update_terminal
@@ -803,6 +812,30 @@ class MainWindow(QMainWindow):
                 2,
                 severity_item
             )
+
+    def add_vuln_live(self, vuln):
+
+        row = self.vuln_table.rowCount()
+
+        self.vuln_table.insertRow(row)
+
+        self.vuln_table.setItem(
+            row,
+            0,
+            QTableWidgetItem(vuln["type"])
+        )
+
+        self.vuln_table.setItem(
+            row,
+            1,
+            QTableWidgetItem(vuln["url"])
+        )
+
+        self.vuln_table.setItem(
+            row,
+            2,
+            QTableWidgetItem(vuln["severity"])
+        )
 
     # =====================================================
     # SCAN FINISHED

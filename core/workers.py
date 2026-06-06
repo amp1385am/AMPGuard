@@ -9,6 +9,8 @@ class ScanWorker(QThread):
 
     progress_signal = Signal(int)
 
+    vuln_found_signal = Signal(dict)
+
     finished_signal = Signal(list)
 
     def __init__(self, target):
@@ -20,6 +22,10 @@ class ScanWorker(QThread):
     def run(self):
 
         scanner = WebScanner(self.target)
+
+        scanner.vuln_callback = (
+            self.vuln_found_signal.emit
+        )
 
         self.log_signal.emit(
             "[SYSTEM] Scanner initialized."
