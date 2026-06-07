@@ -4,9 +4,9 @@ from PySide6.QtWidgets import (
     QProgressBar, QFrame, QListWidget, QStackedWidget,
     QTableWidget, QTableWidgetItem, QComboBox,
     QSizePolicy, QHeaderView, QDialog, QDialogButtonBox,
-    QScrollArea
+    QScrollArea, QFormLayout
 )
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QSettings
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -22,10 +22,11 @@ from core.xml_exporter import XMLExporter
 from datetime import datetime
 import os
 import webbrowser
+import requests   # اضافه شده برای ایجاد session
 
 
 # ══════════════════════════════════════════════════════
-#  VULN DETAIL POPUP
+#  VULN DETAIL POPUP (بدون تغییر)
 # ══════════════════════════════════════════════════════
 
 class VulnDetailDialog(QDialog):
@@ -142,6 +143,19 @@ class ChartWidget(FigureCanvas):
         "Low":      "#30d158",
     }
 
+    # رنگ‌های ثابت برای هر نوع آسیب‌پذیری (برای نمودار نوارهای افقی)
+    TYPE_COLORS = {
+        "SQL Injection":            "#ff2d55",
+        "Reflected XSS":            "#ff6b35",
+        "Form XSS":                 "#ff9f4a",
+        "LFI / Path Traversal":     "#ffd60a",
+        "SSRF":                     "#bf5af2",
+        "Missing CSRF Token":       "#5ac8fa",
+        "Missing Security Header":  "#30d158",
+        "Interesting Endpoint":     "#888888",
+        "Other":                    "#aaaaaa",
+    }
+
     def __init__(self):
         self.figure = Figure(figsize=(9, 3.6), facecolor="#1a1a1a")
         super().__init__(self.figure)
@@ -184,13 +198,8 @@ class ChartWidget(FigureCanvas):
         if type_counts:
             labels = list(type_counts.keys())
             values = list(type_counts.values())
-            bar_colors = [
-                self.COLORS.get(
-                    next((v["severity"] for v in vulnerabilities if v["type"] == l), "Low"),
-                    "#00ff99"
-                )
-                for l in labels
-            ]
+            # استفاده از رنگ ثابت برای هر نوع
+            bar_colors = [self.TYPE_COLORS.get(l, "#00ff99") for l in labels]
             bars = ax_bar.barh(labels, values, color=bar_colors, height=0.55)
             ax_bar.set_xlabel("Count", color="#666", fontsize=9)
             ax_bar.tick_params(axis="y", labelsize=8, colors="#aaa")
@@ -397,7 +406,7 @@ class RichTerminal(QTextEdit):
 
 
 # ══════════════════════════════════════════════════════
-#  MAIN WINDOW
+#  MAIN WINDOW (با قابلیت احراز هویت)
 # ══════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
@@ -408,6 +417,7 @@ class MainWindow(QMainWindow):
         self.db = DatabaseManager()
         self.workers = []
         self.current_vulnerabilities = []
+        self.auth_config = {"type": "None"}   # مقدار پیش‌فرض
 
         self.setWindowTitle("AMPGuard")
         self.resize(1400, 900)
@@ -642,6 +652,16 @@ class MainWindow(QMainWindow):
         self.apply_theme_button = QPushButton("Apply Theme")
         self.apply_theme_button.setFixedHeight(36)
         settings_layout.addWidget(self.apply_theme_button)
+
+        # اضافه کردن بخش Authentication
+        auth_label = QLabel("Authentication")
+        auth_label.setStyleSheet("color: #00ff99; font-size: 16px; margin-top: 20px;")
+        settings_layout.addWidget(auth_label)
+        self.auth_button = QPushButton("🔐 Configure Authentication")
+        self.auth_button.setFixedHeight(36)
+        settings_layout.addWidget(self.auth_button)
+        self.auth_button.clicked.connect(self.open_auth_dialog)
+
         settings_layout.addStretch()
 
         # ── Assemble ──────────────────────────────────
@@ -654,6 +674,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.pages, stretch=1)
 
         self.load_theme("cyber_dark.qss")
+        self.load_auth_settings()   # بارگذاری تنظیمات احراز هویت ذخیره شده
 
         self.start_button.clicked.connect(self.start_scan)
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
@@ -681,7 +702,153 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # ══════════════════════════════════════════════════
-    #  SCAN CONTROL
+    #  AUTHENTICATION (جدید)
+    # ══════════════════════════════════════════════════
+
+    def open_auth_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Authentication Configuration")
+        dialog.setMinimumWidth(450)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel("Authentication Type:"))
+        auth_type = QComboBox()
+        auth_type.addItems(["None", "Basic Auth", "Cookie (from string)", "Bearer Token"])
+        layout.addWidget(auth_type)
+
+        stack = QStackedWidget()
+        # صفحه 0: None
+        stack.addWidget(QWidget())
+        # صفحه 1: Basic Auth
+        basic_widget = QWidget()
+        basic_layout = QFormLayout(basic_widget)
+        basic_user = QLineEdit()
+        basic_pass = QLineEdit()
+        basic_pass.setEchoMode(QLineEdit.Password)
+        basic_layout.addRow("Username:", basic_user)
+        basic_layout.addRow("Password:", basic_pass)
+        stack.addWidget(basic_widget)
+        # صفحه 2: Cookie string
+        cookie_widget = QWidget()
+        cookie_layout = QVBoxLayout(cookie_widget)
+        cookie_edit = QTextEdit()
+        cookie_edit.setPlaceholderText("sessionid=abc123; csrftoken=xyz...")
+        cookie_layout.addWidget(QLabel("Cookie header value (e.g., key1=value1; key2=value2):"))
+        cookie_layout.addWidget(cookie_edit)
+        stack.addWidget(cookie_widget)
+        # صفحه 3: Bearer Token
+        token_widget = QWidget()
+        token_layout = QVBoxLayout(token_widget)
+        token_edit = QLineEdit()
+        token_edit.setPlaceholderText("eyJhbGciOiJIUzI1NiIs...")
+        token_layout.addWidget(QLabel("Token:"))
+        token_layout.addWidget(token_edit)
+        stack.addWidget(token_widget)
+
+        layout.addWidget(stack)
+        auth_type.currentIndexChanged.connect(stack.setCurrentIndex)
+
+        # دکمه تست (اختیاری)
+        test_btn = QPushButton("Test Connection (with target URL)")
+        layout.addWidget(test_btn)
+
+        # دکمه‌های OK/Cancel
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        # نگهداری ارجاع به ویجت‌ها
+        dialog.auth_type = auth_type
+        dialog.basic_user = basic_user
+        dialog.basic_pass = basic_pass
+        dialog.cookie_edit = cookie_edit
+        dialog.token_edit = token_edit
+        dialog.test_btn = test_btn
+
+        # تست اتصال با استفاده از target وارد شده در صفحه اصلی
+        def test_auth():
+            target = self.url_input.text().strip()
+            if not target:
+                self.terminal.append_colored("[ERROR] Please enter a target URL in Dashboard first.")
+                return
+            session = self._create_session_from_config(
+                auth_type.currentText(),
+                basic_user.text(),
+                basic_pass.text(),
+                cookie_edit.toPlainText().strip(),
+                token_edit.text().strip()
+            )
+            try:
+                resp = session.get(target, timeout=10)
+                self.terminal.append_colored(f"[TEST] Auth test to {target} -> HTTP {resp.status_code}")
+                if resp.status_code == 200:
+                    self.terminal.append_colored("[TEST] Success! Authentication seems valid.")
+                else:
+                    self.terminal.append_colored(f"[TEST] Unexpected status code: {resp.status_code}")
+            except Exception as e:
+                self.terminal.append_colored(f"[TEST] Error: {e}")
+
+        test_btn.clicked.connect(test_auth)
+
+        if dialog.exec() == QDialog.Accepted:
+            atype = auth_type.currentText()
+            self.auth_config = {
+                "type": atype,
+                "basic": {"username": basic_user.text(), "password": basic_pass.text()},
+                "cookie": cookie_edit.toPlainText().strip(),
+                "bearer": token_edit.text().strip(),
+            }
+            self.save_auth_settings()
+            self.terminal.append_colored(f"[SYSTEM] Authentication configured: {atype}")
+
+    def _create_session_from_config(self, atype, basic_user, basic_pass, cookie_str, bearer_token):
+        session = requests.Session()
+        if atype == "Basic Auth":
+            session.auth = (basic_user, basic_pass)
+        elif atype == "Cookie (from string)":
+            for pair in cookie_str.split(';'):
+                if '=' in pair:
+                    k, v = pair.strip().split('=', 1)
+                    session.cookies.set(k, v)
+        elif atype == "Bearer Token":
+            session.headers.update({"Authorization": f"Bearer {bearer_token}"})
+        return session
+
+    def create_authenticated_session(self):
+        """ساخت session بر اساس auth_config جاری"""
+        cfg = self.auth_config
+        return self._create_session_from_config(
+            cfg["type"],
+            cfg["basic"]["username"],
+            cfg["basic"]["password"],
+            cfg["cookie"],
+            cfg["bearer"]
+        )
+
+    def save_auth_settings(self):
+        settings = QSettings("AMPGuard", "Auth")
+        settings.setValue("type", self.auth_config["type"])
+        settings.setValue("basic_user", self.auth_config["basic"]["username"])
+        # رمز عبور را به صورت ساده ذخیره می‌کنیم (برای نمونه، بهتر است رمزگذاری شود)
+        settings.setValue("basic_pass", self.auth_config["basic"]["password"])
+        settings.setValue("cookie", self.auth_config["cookie"])
+        settings.setValue("bearer", self.auth_config["bearer"])
+
+    def load_auth_settings(self):
+        settings = QSettings("AMPGuard", "Auth")
+        self.auth_config = {
+            "type": settings.value("type", "None"),
+            "basic": {
+                "username": settings.value("basic_user", ""),
+                "password": settings.value("basic_pass", "")
+            },
+            "cookie": settings.value("cookie", ""),
+            "bearer": settings.value("bearer", ""),
+        }
+
+    # ══════════════════════════════════════════════════
+    #  SCAN CONTROL (تغییر یافته)
     # ══════════════════════════════════════════════════
 
     def start_scan(self):
@@ -690,6 +857,12 @@ class MainWindow(QMainWindow):
             self.terminal.append_colored("[ERROR] Please enter a target URL.")
             return
 
+        # ساخت session احراز شده در صورت نیاز
+        session = None
+        if self.auth_config["type"] != "None":
+            session = self.create_authenticated_session()
+            self.terminal.append_colored(f"[SYSTEM] Using authentication: {self.auth_config['type']}")
+
         self.terminal.clear()
         self.vuln_table.setRowCount(0)
         self.progress.setValue(0)
@@ -697,7 +870,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self._reset_cards()
 
-        self.worker = ScanWorker(target)
+        self.worker = ScanWorker(target, session=session)   # ارسال session
         self.worker.log_signal.connect(self.terminal.append_colored)
         self.worker.vuln_found_signal.connect(self.add_vuln_live)
         self.worker.progress_signal.connect(self.progress.setValue)
@@ -707,12 +880,18 @@ class MainWindow(QMainWindow):
 
     def start_multi_scan(self):
         targets = self.multi_target_input.toPlainText().splitlines()
+        # ساخت session یکسان برای همه (در صورت وجود)
+        session = None
+        if self.auth_config["type"] != "None":
+            session = self.create_authenticated_session()
+            self.terminal.append_colored(f"[SYSTEM] Using authentication for multi-scan: {self.auth_config['type']}")
+
         for target in targets:
             target = target.strip()
             if not target:
                 continue
             self.terminal.append_colored(f"[MULTI] Starting scan: {target}")
-            w = ScanWorker(target)
+            w = ScanWorker(target, session=session)
             self.workers.append(w)
             w.log_signal.connect(self.terminal.append_colored)
             w.progress_signal.connect(self.progress.setValue)
@@ -721,7 +900,7 @@ class MainWindow(QMainWindow):
             w.start()
 
     # ══════════════════════════════════════════════════
-    #  VULN TABLE
+    #  VULN TABLE (بدون تغییر)
     # ══════════════════════════════════════════════════
 
     SEVERITY_COLORS = {
@@ -737,12 +916,9 @@ class MainWindow(QMainWindow):
         self.vuln_table.insertRow(row)
         self._set_row(row, vuln)
 
-        # به‌روزرسانی نمودار و کارت‌ها بعد از هر آسیب‌پذیری جدید
+        # Live update charts & stat cards
         self.chart.update_chart(self.current_vulnerabilities)
         self._update_cards_from_vulns()
-
-        # (اختیاری) اگر می‌خواهید جدول فیلتر شده هم به‌روز شود، می‌توانید filter_vulnerabilities را صدا بزنید
-        # اما فعلاً نیازی نیست.
 
     def fill_vulnerability_table(self, vulns: list):
         self.vuln_table.setRowCount(len(vulns))
@@ -776,6 +952,26 @@ class MainWindow(QMainWindow):
         ]
         self.fill_vulnerability_table(out)
 
+    def _update_cards_from_vulns(self):
+        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0, "csrf": 0}
+        for v in self.current_vulnerabilities:
+            t = v["type"].lower()
+            if "sql" in t:
+                counts["sql"] += 1
+            elif "xss" in t:
+                counts["xss"] += 1
+            elif "lfi" in t or "path traversal" in t:
+                counts["lfi"] += 1
+            elif "ssrf" in t:
+                counts["ssrf"] += 1
+            elif "csrf" in t:
+                counts["csrf"] += 1
+        self.sqli_card.set_value(counts["sql"])
+        self.xss_card.set_value(counts["xss"])
+        self.lfi_card.set_value(counts["lfi"])
+        self.ssrf_card.set_value(counts["ssrf"])
+        self.csrf_card.set_value(counts["csrf"])
+
     # ══════════════════════════════════════════════════
     #  SCAN FINISHED
     # ══════════════════════════════════════════════════
@@ -786,17 +982,6 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
 
         self._update_cards_from_vulns()
-        for v in vulnerabilities:
-            t = v["type"].lower()
-            for k in counts:
-                if k in t:
-                    counts[k] += 1
-
-        self.sqli_card.set_value(counts["sql"])
-        self.xss_card.set_value(counts["xss"])
-        self.lfi_card.set_value(counts["lfi"])
-        self.ssrf_card.set_value(counts["ssrf"])
-        self.csrf_card.set_value(counts["csrf"])
 
         scan_id = self.db.save_scan(self.url_input.text(), str(datetime.now()))
         for v in vulnerabilities:
@@ -827,7 +1012,7 @@ class MainWindow(QMainWindow):
         self.load_scan_history()
 
     # ══════════════════════════════════════════════════
-    #  HELPERS
+    #  HELPERS (بدون تغییر)
     # ══════════════════════════════════════════════════
 
     def open_report(self):
@@ -845,72 +1030,6 @@ class MainWindow(QMainWindow):
         for card in [self.sqli_card, self.xss_card, self.lfi_card,
                      self.ssrf_card, self.csrf_card]:
             card.set_value(0)
-
-    def _update_cards_from_vulns(self):
-        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0, "csrf": 0}
-        for v in self.current_vulnerabilities:
-            t = v["type"].lower()
-            if "sql" in t:
-                counts["sql"] += 1
-            elif "xss" in t:
-                counts["xss"] += 1
-            elif "lfi" in t or "path traversal" in t:
-                counts["lfi"] += 1
-            elif "ssrf" in t:
-                counts["ssrf"] += 1
-            elif "csrf" in t:
-                counts["csrf"] += 1
-        self.sqli_card.set_value(counts["sql"])
-        self.xss_card.set_value(counts["xss"])
-        self.lfi_card.set_value(counts["lfi"])
-        self.ssrf_card.set_value(counts["ssrf"])
-        self.csrf_card.set_value(counts["csrf"])
-
-    def add_vuln_live(self, vuln: dict):
-        self.current_vulnerabilities.append(vuln)
-        row = self.vuln_table.rowCount()
-        self.vuln_table.insertRow(row)
-        self._set_row(row, vuln)
-
-        # Live update charts & stat cards
-        self.chart.update_chart(self.current_vulnerabilities)
-        self._update_cards_from_vulns()
-
-    def scan_finished(self, vulnerabilities: list):
-        self.start_button.setEnabled(True)
-        self.current_vulnerabilities = vulnerabilities
-        self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
-
-        # استفاده از تابع کمکی برای کارت‌ها
-        self._update_cards_from_vulns()
-
-        scan_id = self.db.save_scan(self.url_input.text(), str(datetime.now()))
-        for v in vulnerabilities:
-            self.db.save_vulnerability(scan_id, v["type"], v["url"], v["severity"])
-
-        target = self.url_input.text()
-
-        for gen, tag in [
-            (ReportGenerator.generate_json_report, "JSON"),
-            (ReportGenerator.generate_html_report, "HTML"),
-            (ReportGenerator.generate_pdf_report, "PDF"),
-        ]:
-            path = gen(target, vulnerabilities)
-            self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
-            self.report_list.addItem(path)
-
-        for exporter, tag in [
-            (lambda t, v: CSVExporter.export(t, v), "CSV"),
-            (lambda t, v: MarkdownExporter.export(t, v), "Markdown"),
-            (lambda t, v: XMLExporter.export(t, v), "XML"),
-        ]:
-            path = exporter(target, vulnerabilities)
-            self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
-            self.report_list.addItem(path)
-
-        self.fill_vulnerability_table(vulnerabilities)
-        self.chart.update_chart(vulnerabilities)  # یکبار دیگر برای اطمینان
-        self.load_scan_history()
 
     def load_scan_history(self):
         scans = self.db.get_scans()
@@ -949,4 +1068,4 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"

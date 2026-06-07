@@ -3,13 +3,16 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import os
 
+from selenium.webdriver.support.expected_conditions import element_selection_state_to_be
+
 
 class WebScanner:
 
-    def __init__(self, target):
+    def __init__(self, target, session=None):
 
         self.base_target = target
         self.target = target
+        self.session = session if session is not None else requests.Session()
 
         self.session = requests.Session()
 

@@ -2,6 +2,7 @@ from PySide6.QtCore import QThread, Signal
 import time
 
 from core.scanner import WebScanner
+from requests import session
 
 
 class ScanWorker(QThread):
@@ -15,16 +16,17 @@ class ScanWorker(QThread):
     stats_signal = Signal(dict)
     # dict keys: urls_scanned, urls_total, speed, eta_sec
 
-    def __init__(self, target):
+    def __init__(self, target, session=None):
         super().__init__()
         self.target = target
         self._start_time = None
+        self.custom_session = session
 
     # ─────────────────────────────────────────────────
     def run(self):
         self._start_time = time.time()
 
-        scanner = WebScanner(self.target)
+        scanner = WebScanner(self.target, session=self.custom_session)
         scanner.vuln_callback = self.vuln_found_signal.emit
 
         # Wrap the scanner's URL-by-URL progress so we
