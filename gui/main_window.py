@@ -3,7 +3,8 @@ from PySide6.QtWidgets import (
     QPushButton, QTextEdit, QLineEdit, QLabel,
     QProgressBar, QFrame, QListWidget, QStackedWidget,
     QTableWidget, QTableWidgetItem, QComboBox,
-    QSizePolicy, QHeaderView
+    QSizePolicy, QHeaderView, QDialog, QDialogButtonBox,
+    QScrollArea
 )
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
@@ -15,6 +16,8 @@ from core.workers import ScanWorker
 from core.report_generator import ReportGenerator
 from core.database import DatabaseManager
 from core.csv_exporter import CSVExporter
+from core.md_exporter import MarkdownExporter
+from core.xml_exporter import XMLExporter
 
 from datetime import datetime
 import os
@@ -22,11 +25,116 @@ import webbrowser
 
 
 # ══════════════════════════════════════════════════════
-#  CHART WIDGET
+#  VULN DETAIL POPUP
+# ══════════════════════════════════════════════════════
+
+class VulnDetailDialog(QDialog):
+    """Popup showing full details of a single vulnerability."""
+
+    SEVERITY_COLORS = {
+        "Critical": "#ff2d55",
+        "High":     "#ff6b35",
+        "Medium":   "#ffd60a",
+        "Low":      "#30d158",
+    }
+
+    def __init__(self, vuln: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Vulnerability Detail")
+        self.setMinimumWidth(560)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #111;
+                color: #ccc;
+            }
+            QLabel { color: #ccc; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        sev   = vuln.get("severity", "—")
+        color = self.SEVERITY_COLORS.get(sev, "#888")
+
+        # ── Header ──────────────────────────────────
+        header = QHBoxLayout()
+        type_lbl = QLabel(vuln.get("type", "Unknown"))
+        type_lbl.setStyleSheet("font-size: 18px; font-weight: 700; color: #fff;")
+        sev_lbl = QLabel(f"  {sev}  ")
+        sev_lbl.setStyleSheet(
+            f"background:{color}; color:{'#000' if sev in ('Medium','Low') else '#fff'};"
+            f"border-radius:4px; font-weight:700; font-size:12px; padding:2px 8px;"
+        )
+        sev_lbl.setFixedHeight(24)
+        header.addWidget(type_lbl)
+        header.addStretch()
+        header.addWidget(sev_lbl)
+        layout.addLayout(header)
+
+        # ── Divider ──────────────────────────────────
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #2a2a2a;")
+        layout.addWidget(line)
+
+        # ── Fields ───────────────────────────────────
+        def field(label: str, value: str, mono=False):
+            row = QVBoxLayout()
+            row.setSpacing(2)
+            lbl = QLabel(label.upper())
+            lbl.setStyleSheet("color:#555; font-size:10px; font-weight:700;")
+            val = QLabel(value or "—")
+            val.setWordWrap(True)
+            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            style = "color:#e0e0e0; font-size:13px;"
+            if mono:
+                style += " font-family: 'Courier New', monospace;"
+            val.setStyleSheet(style)
+            row.addWidget(lbl)
+            row.addWidget(val)
+            return row
+
+        layout.addLayout(field("URL", vuln.get("url", "—"), mono=True))
+        layout.addLayout(field("Detail", vuln.get("detail", "No additional detail")))
+        layout.addLayout(field("Severity", sev))
+        layout.addLayout(field("Detected at", vuln.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))))
+
+        # ── Remediation hint ─────────────────────────
+        hints = {
+            "SQL Injection":          "Use parameterized queries / prepared statements. Never concatenate user input into SQL.",
+            "Reflected XSS":          "Encode all user-supplied output. Implement a strict Content-Security-Policy.",
+            "Form XSS":               "Validate and encode form inputs server-side before rendering.",
+            "LFI / Path Traversal":   "Whitelist allowed file paths. Never pass user input directly to file-system calls.",
+            "SSRF":                   "Whitelist allowed outbound URLs. Block requests to internal/cloud metadata IPs.",
+            "Missing CSRF Token":     "Add a cryptographically random CSRF token to every state-changing POST form.",
+            "Missing Security Header":"Add the missing HTTP security header to all responses.",
+            "Interesting Endpoint":   "Review whether this endpoint should be publicly accessible.",
+        }
+        hint = hints.get(vuln.get("type", ""), "Consult OWASP guidelines for remediation advice.")
+        layout.addLayout(field("Remediation", hint))
+
+        # ── Close button ─────────────────────────────
+        btn = QDialogButtonBox(QDialogButtonBox.Close)
+        btn.rejected.connect(self.reject)
+        btn.setStyleSheet("""
+            QPushButton {
+                background:#00ff99; color:#000;
+                border:none; border-radius:6px;
+                padding:6px 20px; font-weight:700;
+            }
+            QPushButton:hover { background:#00e588; }
+        """)
+        layout.addWidget(btn)
+
+
+# ══════════════════════════════════════════════════════
+#  DUAL CHART WIDGET  (Bar + Pie side-by-side)
 # ══════════════════════════════════════════════════════
 
 class ChartWidget(FigureCanvas):
 
+    SEVERITY_ORDER  = ["Critical", "High", "Medium", "Low"]
     COLORS = {
         "Critical": "#ff2d55",
         "High":     "#ff6b35",
@@ -35,52 +143,99 @@ class ChartWidget(FigureCanvas):
     }
 
     def __init__(self):
-        self.figure = Figure(figsize=(5, 5), facecolor="#1a1a1a")
+        self.figure = Figure(figsize=(9, 3.6), facecolor="#1a1a1a")
         super().__init__(self.figure)
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_facecolor("#1a1a1a")
-        self.setMinimumHeight(260)
+        self.setMinimumHeight(240)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._draw_empty()
+
+    def _draw_empty(self):
+        self.figure.clear()
+        for i, title in enumerate(["Vuln Types", "Severity Split"]):
+            ax = self.figure.add_subplot(1, 2, i + 1)
+            ax.set_facecolor("#1a1a1a")
+            ax.text(0.5, 0.5, "No data", color="#444",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=12)
+            ax.set_title(title, color="#00ff99", fontsize=11, pad=10)
+            ax.tick_params(colors="#555")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#2a2a2a")
+        self.figure.tight_layout(pad=2)
+        self.draw()
 
     def update_chart(self, vulnerabilities):
-        self.ax.clear()
-        self.ax.set_facecolor("#1a1a1a")
+        self.figure.clear()
 
-        counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+        # ── Count by type ────────────────────────────
+        type_counts: dict = {}
+        sev_counts  = {s: 0 for s in self.SEVERITY_ORDER}
+
         for v in vulnerabilities:
+            t = v.get("type", "Other")
             s = v.get("severity", "")
-            if s in counts:
-                counts[s] += 1
+            type_counts[t] = type_counts.get(t, 0) + 1
+            if s in sev_counts:
+                sev_counts[s] += 1
 
-        labels = [k for k, v in counts.items() if v > 0]
-        values = [counts[k] for k in labels]
-        colors = [self.COLORS[k] for k in labels]
+        # ── Bar chart (left) ─────────────────────────
+        ax_bar = self.figure.add_subplot(1, 2, 1)
+        ax_bar.set_facecolor("#1a1a1a")
 
-        if values:
-            wedges, texts, autotexts = self.ax.pie(
-                values,
-                labels=labels,
-                colors=colors,
+        if type_counts:
+            labels = list(type_counts.keys())
+            values = list(type_counts.values())
+            bar_colors = [
+                self.COLORS.get(
+                    next((v["severity"] for v in vulnerabilities if v["type"] == l), "Low"),
+                    "#00ff99"
+                )
+                for l in labels
+            ]
+            bars = ax_bar.barh(labels, values, color=bar_colors, height=0.55)
+            ax_bar.set_xlabel("Count", color="#666", fontsize=9)
+            ax_bar.tick_params(axis="y", labelsize=8, colors="#aaa")
+            ax_bar.tick_params(axis="x", labelsize=8, colors="#555")
+            for spine in ax_bar.spines.values():
+                spine.set_edgecolor("#2a2a2a")
+            for bar, val in zip(bars, values):
+                ax_bar.text(
+                    bar.get_width() + 0.05, bar.get_y() + bar.get_height() / 2,
+                    str(val), va="center", color="#ccc", fontsize=8
+                )
+        else:
+            ax_bar.text(0.5, 0.5, "No data", color="#444",
+                        ha="center", va="center", transform=ax_bar.transAxes)
+
+        ax_bar.set_title("Vuln Types", color="#00ff99", fontsize=11, pad=10)
+
+        # ── Pie chart (right) ────────────────────────
+        ax_pie = self.figure.add_subplot(1, 2, 2)
+        ax_pie.set_facecolor("#1a1a1a")
+
+        pie_labels = [s for s in self.SEVERITY_ORDER if sev_counts[s] > 0]
+        pie_values = [sev_counts[s] for s in pie_labels]
+        pie_colors = [self.COLORS[s] for s in pie_labels]
+
+        if pie_values:
+            wedges, texts, autotexts = ax_pie.pie(
+                pie_values,
+                labels=pie_labels,
+                colors=pie_colors,
                 autopct="%1.0f%%",
                 startangle=140,
                 wedgeprops={"linewidth": 2, "edgecolor": "#1a1a1a"},
-                textprops={"color": "white", "fontsize": 11},
+                textprops={"color": "white", "fontsize": 9},
             )
             for at in autotexts:
                 at.set_color("white")
-                at.set_fontsize(10)
+                at.set_fontsize(8)
         else:
-            self.ax.text(
-                0.5, 0.5, "No data",
-                color="#555", ha="center", va="center",
-                transform=self.ax.transAxes, fontsize=13
-            )
+            ax_pie.text(0.5, 0.5, "No data", color="#444",
+                        ha="center", va="center", transform=ax_pie.transAxes)
 
-        self.ax.set_title(
-            "Vulnerability Breakdown",
-            color="#00ff99", fontsize=13, pad=14
-        )
-        self.figure.tight_layout()
+        ax_pie.set_title("Severity Split", color="#00ff99", fontsize=11, pad=10)
+
+        self.figure.tight_layout(pad=2)
         self.draw()
 
 
@@ -89,7 +244,6 @@ class ChartWidget(FigureCanvas):
 # ══════════════════════════════════════════════════════
 
 class StatCard(QFrame):
-    """Compact card: icon label + big counter + sub-label."""
 
     def __init__(self, title: str, icon: str, accent: str = "#00ff99"):
         super().__init__()
@@ -100,7 +254,6 @@ class StatCard(QFrame):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(4)
 
-        # Icon + title row
         top = QHBoxLayout()
         icon_lbl = QLabel(icon)
         icon_lbl.setStyleSheet(f"color: {accent}; font-size: 18px;")
@@ -111,7 +264,6 @@ class StatCard(QFrame):
         top.addStretch()
         layout.addLayout(top)
 
-        # Big number
         self.value_label = QLabel("0")
         self.value_label.setStyleSheet(
             f"color: {accent}; font-size: 32px; font-weight: 700;"
@@ -125,9 +277,7 @@ class StatCard(QFrame):
                 border: 1px solid #2a2a2a;
                 border-radius: 10px;
             }}
-            #StatCard:hover {{
-                border: 1px solid {accent};
-            }}
+            #StatCard:hover {{ border: 1px solid {accent}; }}
         """)
 
     def set_value(self, v):
@@ -135,11 +285,10 @@ class StatCard(QFrame):
 
 
 # ══════════════════════════════════════════════════════
-#  REAL-TIME STATS BAR
+#  STATS BAR
 # ══════════════════════════════════════════════════════
 
 class StatsBar(QFrame):
-    """Horizontal bar showing live scan metrics."""
 
     def __init__(self):
         super().__init__()
@@ -178,9 +327,7 @@ class StatsBar(QFrame):
 
     def update_stats(self, data: dict):
         self.setVisible(True)
-        self._lbl_urls["value"].setText(
-            f"{data['urls_scanned']} / {data['urls_total']}"
-        )
+        self._lbl_urls["value"].setText(f"{data['urls_scanned']} / {data['urls_total']}")
         self._lbl_speed["value"].setText(f"{data['speed']} URL/s")
         eta = data["eta_sec"]
         self._lbl_eta["value"].setText(
@@ -199,7 +346,6 @@ class StatsBar(QFrame):
 # ══════════════════════════════════════════════════════
 
 class RichTerminal(QTextEdit):
-    """Color-coded read-only log terminal."""
 
     COLORS = {
         "[SYSTEM]":  "#00ff99",
@@ -242,7 +388,6 @@ class RichTerminal(QTextEdit):
 
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
-
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color))
         cursor.setCharFormat(fmt)
@@ -265,9 +410,8 @@ class MainWindow(QMainWindow):
         self.current_vulnerabilities = []
 
         self.setWindowTitle("AMPGuard")
-        self.resize(1400, 860)
+        self.resize(1400, 900)
 
-        # ── Central widget ────────────────────────────
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
@@ -307,12 +451,7 @@ class MainWindow(QMainWindow):
         self.toggle_sidebar_button = QPushButton("☰")
         self.toggle_sidebar_button.setFixedSize(40, 40)
         self.toggle_sidebar_button.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #888;
-                font-size: 18px;
-                border: none;
-            }
+            QPushButton { background: transparent; color: #888; font-size: 18px; border: none; }
             QPushButton:hover { color: #00ff99; }
         """)
 
@@ -329,19 +468,16 @@ class MainWindow(QMainWindow):
         # ── Pages ─────────────────────────────────────
         self.pages = QStackedWidget()
 
-        # -- Dashboard page ---------------------------
+        # ── Dashboard ─────────────────────────────────
         dash = QWidget()
         dash_layout = QVBoxLayout(dash)
         dash_layout.setSpacing(10)
         dash_layout.setContentsMargins(20, 16, 20, 16)
 
-        # Title
         title = QLabel("AMPGuard  ·  Web Pentest Scanner")
         title.setStyleSheet("font-size: 22px; font-weight: 700; color: #00ff99;")
-        title.setAlignment(Qt.AlignLeft)
         dash_layout.addWidget(title)
 
-        # URL row
         url_row = QHBoxLayout()
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://target.example.com")
@@ -353,7 +489,6 @@ class MainWindow(QMainWindow):
         url_row.addWidget(self.start_button)
         dash_layout.addLayout(url_row)
 
-        # Progress
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.progress.setFixedHeight(6)
@@ -364,22 +499,21 @@ class MainWindow(QMainWindow):
         """)
         dash_layout.addWidget(self.progress)
 
-        # Stats bar
         self.stats_bar = StatsBar()
         dash_layout.addWidget(self.stats_bar)
 
-        # Vuln type cards
         cards_row = QHBoxLayout()
         cards_row.setSpacing(10)
         self.sqli_card = StatCard("SQL Injection", "💉", "#ff2d55")
         self.xss_card  = StatCard("XSS",           "⚡", "#ff6b35")
         self.lfi_card  = StatCard("LFI",            "📂", "#ffd60a")
         self.ssrf_card = StatCard("SSRF",           "🌐", "#bf5af2")
-        for card in [self.sqli_card, self.xss_card, self.lfi_card, self.ssrf_card]:
+        self.csrf_card = StatCard("CSRF",           "🔓", "#5ac8fa")
+        for card in [self.sqli_card, self.xss_card, self.lfi_card,
+                     self.ssrf_card, self.csrf_card]:
             cards_row.addWidget(card)
         dash_layout.addLayout(cards_row)
 
-        # Search / filter row
         filter_row = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search vulnerabilities…")
@@ -391,22 +525,19 @@ class MainWindow(QMainWindow):
         filter_row.addStretch()
         dash_layout.addLayout(filter_row)
 
-        # Terminal + Chart side by side
         mid_row = QHBoxLayout()
         mid_row.setSpacing(12)
 
-        # Terminal
         self.terminal = RichTerminal()
         self.terminal.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         mid_row.addWidget(self.terminal, stretch=3)
 
-        # Chart
         self.chart = ChartWidget()
-        mid_row.addWidget(self.chart, stretch=2)
+        mid_row.addWidget(self.chart, stretch=3)
 
         dash_layout.addLayout(mid_row)
 
-        # Vuln table
+        # Vuln table — double-click opens popup
         self.vuln_table = QTableWidget()
         self.vuln_table.setColumnCount(3)
         self.vuln_table.setHorizontalHeaderLabels(["Type", "URL", "Severity"])
@@ -417,6 +548,7 @@ class MainWindow(QMainWindow):
         self.vuln_table.setShowGrid(False)
         self.vuln_table.verticalHeader().setVisible(False)
         self.vuln_table.setMaximumHeight(220)
+        self.vuln_table.setToolTip("Double-click a row to see full details")
         self.vuln_table.setStyleSheet("""
             QTableWidget {
                 background-color: #111;
@@ -440,9 +572,10 @@ class MainWindow(QMainWindow):
             QTableWidget::item { padding: 6px 10px; }
             QTableWidget::item:selected { background-color: #00ff9930; }
         """)
+        self.vuln_table.doubleClicked.connect(self._show_vuln_detail)
         dash_layout.addWidget(self.vuln_table)
 
-        # -- Scanner page ----------------------------
+        # ── Scanner page ──────────────────────────────
         scanner_page = QWidget()
         scanner_layout = QVBoxLayout(scanner_page)
         scanner_layout.setContentsMargins(20, 16, 20, 16)
@@ -453,9 +586,7 @@ class MainWindow(QMainWindow):
 
         self.multi_target_input = QTextEdit()
         self.multi_target_input.setPlaceholderText(
-            "Enter multiple targets — one per line:\n"
-            "https://site1.example.com\n"
-            "https://site2.example.com"
+            "Enter multiple targets — one per line:\nhttps://site1.example.com\nhttps://site2.example.com"
         )
         scanner_layout.addWidget(self.multi_target_input)
 
@@ -464,7 +595,7 @@ class MainWindow(QMainWindow):
         scanner_layout.addWidget(self.multi_scan_button)
         scanner_layout.addStretch()
 
-        # -- Reports page ----------------------------
+        # ── Reports page ──────────────────────────────
         reports_page = QWidget()
         reports_layout = QVBoxLayout(reports_page)
         reports_layout.setContentsMargins(20, 16, 20, 16)
@@ -494,7 +625,7 @@ class MainWindow(QMainWindow):
         reports_layout.addWidget(self.open_report_button)
         reports_layout.addStretch()
 
-        # -- Settings page ---------------------------
+        # ── Settings page ─────────────────────────────
         settings_page = QWidget()
         settings_layout = QVBoxLayout(settings_page)
         settings_layout.setContentsMargins(20, 16, 20, 16)
@@ -513,7 +644,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.apply_theme_button)
         settings_layout.addStretch()
 
-        # ── Assemble pages ────────────────────────────
+        # ── Assemble ──────────────────────────────────
         self.pages.addWidget(dash)
         self.pages.addWidget(scanner_page)
         self.pages.addWidget(reports_page)
@@ -522,10 +653,8 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar_frame)
         main_layout.addWidget(self.pages, stretch=1)
 
-        # ── Load theme ────────────────────────────────
         self.load_theme("cyber_dark.qss")
 
-        # ── Signals ───────────────────────────────────
         self.start_button.clicked.connect(self.start_scan)
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.open_report_button.clicked.connect(self.open_report)
@@ -537,8 +666,19 @@ class MainWindow(QMainWindow):
 
         self.sidebar.setCurrentRow(0)
         self.sidebar_expanded = True
-
         self.load_scan_history()
+
+    # ══════════════════════════════════════════════════
+    #  VULN DETAIL POPUP
+    # ══════════════════════════════════════════════════
+
+    def _show_vuln_detail(self, index):
+        row = index.row()
+        if row < 0 or row >= len(self.current_vulnerabilities):
+            return
+        vuln = self.current_vulnerabilities[row]
+        dlg = VulnDetailDialog(vuln, parent=self)
+        dlg.exec()
 
     # ══════════════════════════════════════════════════
     #  SCAN CONTROL
@@ -592,6 +732,7 @@ class MainWindow(QMainWindow):
     }
 
     def add_vuln_live(self, vuln: dict):
+        self.current_vulnerabilities.append(vuln)
         row = self.vuln_table.rowCount()
         self.vuln_table.insertRow(row)
         self._set_row(row, vuln)
@@ -605,18 +746,15 @@ class MainWindow(QMainWindow):
         self.vuln_table.setItem(row, 0, QTableWidgetItem(vuln["type"]))
         self.vuln_table.setItem(row, 1, QTableWidgetItem(vuln["url"]))
 
-        sev   = vuln["severity"]
-        item  = QTableWidgetItem(f"  {sev}  ")
+        sev  = vuln["severity"]
+        item = QTableWidgetItem(f"  {sev}  ")
         item.setTextAlignment(Qt.AlignCenter)
-
         bg, fg = self.SEVERITY_COLORS.get(sev, ("#444", "#fff"))
         item.setBackground(QColor(bg))
         item.setForeground(QColor(fg))
-
         font = item.font()
         font.setBold(True)
         item.setFont(font)
-
         self.vuln_table.setItem(row, 2, item)
 
     def filter_vulnerabilities(self):
@@ -638,10 +776,9 @@ class MainWindow(QMainWindow):
     def scan_finished(self, vulnerabilities: list):
         self.start_button.setEnabled(True)
         self.current_vulnerabilities = vulnerabilities
-
         self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
 
-        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0}
+        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0, "csrf": 0}
         for v in vulnerabilities:
             t = v["type"].lower()
             for k in counts:
@@ -652,25 +789,31 @@ class MainWindow(QMainWindow):
         self.xss_card.set_value(counts["xss"])
         self.lfi_card.set_value(counts["lfi"])
         self.ssrf_card.set_value(counts["ssrf"])
+        self.csrf_card.set_value(counts["csrf"])
 
-        # DB
         scan_id = self.db.save_scan(self.url_input.text(), str(datetime.now()))
         for v in vulnerabilities:
             self.db.save_vulnerability(scan_id, v["type"], v["url"], v["severity"])
 
-        # Reports
+        target = self.url_input.text()
+
         for gen, tag in [
             (ReportGenerator.generate_json_report, "JSON"),
             (ReportGenerator.generate_html_report, "HTML"),
             (ReportGenerator.generate_pdf_report,  "PDF"),
         ]:
-            path = gen(self.url_input.text(), vulnerabilities)
+            path = gen(target, vulnerabilities)
             self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
             self.report_list.addItem(path)
 
-        csv_path = CSVExporter.export(self.url_input.text(), vulnerabilities)
-        self.terminal.append_colored(f"[REPORT] CSV saved: {csv_path}")
-        self.report_list.addItem(csv_path)
+        for exporter, tag in [
+            (lambda t, v: CSVExporter.export(t, v),              "CSV"),
+            (lambda t, v: MarkdownExporter.export(t, v),         "Markdown"),
+            (lambda t, v: XMLExporter.export(t, v),              "XML"),
+        ]:
+            path = exporter(target, vulnerabilities)
+            self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
+            self.report_list.addItem(path)
 
         self.fill_vulnerability_table(vulnerabilities)
         self.chart.update_chart(vulnerabilities)
@@ -691,7 +834,9 @@ class MainWindow(QMainWindow):
             self.terminal.append_colored("[ERROR] Report file not found.")
 
     def _reset_cards(self):
-        for card in [self.sqli_card, self.xss_card, self.lfi_card, self.ssrf_card]:
+        self.current_vulnerabilities = []
+        for card in [self.sqli_card, self.xss_card, self.lfi_card,
+                     self.ssrf_card, self.csrf_card]:
             card.set_value(0)
 
     def load_scan_history(self):
@@ -721,7 +866,6 @@ class MainWindow(QMainWindow):
             path = os.path.join(base, "gui", "styles", theme_file)
             with open(path, "r") as f:
                 self.setStyleSheet(f.read())
-            print(f"Theme loaded: {theme_file}")
         except Exception as e:
             print(f"Theme error: {e}")
 
@@ -732,4 +876,4 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.4.0"
