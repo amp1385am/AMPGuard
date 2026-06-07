@@ -737,6 +737,13 @@ class MainWindow(QMainWindow):
         self.vuln_table.insertRow(row)
         self._set_row(row, vuln)
 
+        # به‌روزرسانی نمودار و کارت‌ها بعد از هر آسیب‌پذیری جدید
+        self.chart.update_chart(self.current_vulnerabilities)
+        self._update_cards_from_vulns()
+
+        # (اختیاری) اگر می‌خواهید جدول فیلتر شده هم به‌روز شود، می‌توانید filter_vulnerabilities را صدا بزنید
+        # اما فعلاً نیازی نیست.
+
     def fill_vulnerability_table(self, vulns: list):
         self.vuln_table.setRowCount(len(vulns))
         for row, v in enumerate(vulns):
@@ -778,7 +785,7 @@ class MainWindow(QMainWindow):
         self.current_vulnerabilities = vulnerabilities
         self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
 
-        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0, "csrf": 0}
+        self._update_cards_from_vulns()
         for v in vulnerabilities:
             t = v["type"].lower()
             for k in counts:
@@ -839,6 +846,72 @@ class MainWindow(QMainWindow):
                      self.ssrf_card, self.csrf_card]:
             card.set_value(0)
 
+    def _update_cards_from_vulns(self):
+        counts = {"sql": 0, "xss": 0, "lfi": 0, "ssrf": 0, "csrf": 0}
+        for v in self.current_vulnerabilities:
+            t = v["type"].lower()
+            if "sql" in t:
+                counts["sql"] += 1
+            elif "xss" in t:
+                counts["xss"] += 1
+            elif "lfi" in t or "path traversal" in t:
+                counts["lfi"] += 1
+            elif "ssrf" in t:
+                counts["ssrf"] += 1
+            elif "csrf" in t:
+                counts["csrf"] += 1
+        self.sqli_card.set_value(counts["sql"])
+        self.xss_card.set_value(counts["xss"])
+        self.lfi_card.set_value(counts["lfi"])
+        self.ssrf_card.set_value(counts["ssrf"])
+        self.csrf_card.set_value(counts["csrf"])
+
+    def add_vuln_live(self, vuln: dict):
+        self.current_vulnerabilities.append(vuln)
+        row = self.vuln_table.rowCount()
+        self.vuln_table.insertRow(row)
+        self._set_row(row, vuln)
+
+        # Live update charts & stat cards
+        self.chart.update_chart(self.current_vulnerabilities)
+        self._update_cards_from_vulns()
+
+    def scan_finished(self, vulnerabilities: list):
+        self.start_button.setEnabled(True)
+        self.current_vulnerabilities = vulnerabilities
+        self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
+
+        # استفاده از تابع کمکی برای کارت‌ها
+        self._update_cards_from_vulns()
+
+        scan_id = self.db.save_scan(self.url_input.text(), str(datetime.now()))
+        for v in vulnerabilities:
+            self.db.save_vulnerability(scan_id, v["type"], v["url"], v["severity"])
+
+        target = self.url_input.text()
+
+        for gen, tag in [
+            (ReportGenerator.generate_json_report, "JSON"),
+            (ReportGenerator.generate_html_report, "HTML"),
+            (ReportGenerator.generate_pdf_report, "PDF"),
+        ]:
+            path = gen(target, vulnerabilities)
+            self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
+            self.report_list.addItem(path)
+
+        for exporter, tag in [
+            (lambda t, v: CSVExporter.export(t, v), "CSV"),
+            (lambda t, v: MarkdownExporter.export(t, v), "Markdown"),
+            (lambda t, v: XMLExporter.export(t, v), "XML"),
+        ]:
+            path = exporter(target, vulnerabilities)
+            self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
+            self.report_list.addItem(path)
+
+        self.fill_vulnerability_table(vulnerabilities)
+        self.chart.update_chart(vulnerabilities)  # یکبار دیگر برای اطمینان
+        self.load_scan_history()
+
     def load_scan_history(self):
         scans = self.db.get_scans()
         self.history_table.setRowCount(len(scans))
@@ -864,7 +937,7 @@ class MainWindow(QMainWindow):
         try:
             base = os.path.dirname(os.path.dirname(__file__))
             path = os.path.join(base, "gui", "styles", theme_file)
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
         except Exception as e:
             print(f"Theme error: {e}")
