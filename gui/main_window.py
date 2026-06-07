@@ -1,10 +1,12 @@
+from tokenize import tabsize
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLineEdit, QLabel,
     QProgressBar, QFrame, QListWidget, QStackedWidget,
     QTableWidget, QTableWidgetItem, QComboBox,
     QSizePolicy, QHeaderView, QDialog, QDialogButtonBox,
-    QScrollArea, QFormLayout, QDoubleSpinBox          # اضافه شده QDoubleSpinBox
+    QScrollArea, QFormLayout, QDoubleSpinBox, QTabWidget        # اضافه شده QDoubleSpinBox
 )
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QSettings
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
@@ -588,20 +590,38 @@ class MainWindow(QMainWindow):
         scanner_layout = QVBoxLayout(scanner_page)
         scanner_layout.setContentsMargins(20, 16, 20, 16)
 
-        scanner_title = QLabel("Multi-Target Scanner")
-        scanner_title.setStyleSheet("color: #00ff99; font-size: 20px; font-weight: 700;")
-        scanner_layout.addWidget(scanner_title)
-
+        tabs = QTabWidget()
+        #تب 1: Multi-Target (همان widgets قبلی)
+        multi_widget = QWidget()
+        multi_layout = QVBoxLayout(multi_widget)
         self.multi_target_input = QTextEdit()
-        self.multi_target_input.setPlaceholderText(
-            "Enter multiple targets — one per line:\nhttps://site1.example.com\nhttps://site2.example.com"
-        )
-        scanner_layout.addWidget(self.multi_target_input)
-
+        # ... بقیه اجزای multi-target
+        multi_layout.addWidget(self.multi_target_input)
         self.multi_scan_button = QPushButton("▶  Start Multi-Target Scan")
-        self.multi_scan_button.setFixedHeight(38)
-        scanner_layout.addWidget(self.multi_scan_button)
-        scanner_layout.addStretch()
+        multi_layout.addWidget(self.multi_scan_button)
+        multi_layout.addStretch()
+        tabs.addTab(multi_widget, "🌐 Multi-Target")
+
+        # تب 2: REST API Scanner
+        api_widget = QWidget()
+        api_layout = QVBoxLayout(api_widget)
+        api_layout.addWidget(QLabel("Base URL:"))
+        self.api_base_url = QLineEdit()
+        self.api_base_url.setPlaceholderText("https://api.target.com/v1")
+        api_layout.addWidget(self.api_base_url)
+
+        api_layout.addWidget(QLabel("Endpoints (one per line, format: GET /users or POST /users)"))
+        self.api_endpoints = QTextEdit()
+        self.api_endpoints.setPlaceholderText("GET /users\nPOST /users\nGET /users/{id}\nPUT /users/{id}")
+        api_layout.addWidget(self.api_endpoints)
+
+        self.api_scan_button = QPushButton("🚀 Start API Scan")
+        api_layout.addWidget(self.api_scan_button)
+        api_layout.addStretch()
+        tabs.addTab(api_widget, "🔌 REST API")
+        scanner_layout.addWidget(tabs)
+
+
 
         # ── Reports page ──────────────────────────────
         reports_page = QWidget()
@@ -1084,4 +1104,4 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
 
-APP_VERSION = "0.4.3"
+APP_VERSION = "0.4.5"
