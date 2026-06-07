@@ -949,4 +949,4 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
