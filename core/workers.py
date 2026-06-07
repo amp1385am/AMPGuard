@@ -16,17 +16,18 @@ class ScanWorker(QThread):
     stats_signal = Signal(dict)
     # dict keys: urls_scanned, urls_total, speed, eta_sec
 
-    def __init__(self, target, session=None):
+    def __init__(self, target, session=None, delay=0.2):
         super().__init__()
         self.target = target
         self._start_time = None
         self.custom_session = session
+        self.delay = delay
 
     # ─────────────────────────────────────────────────
     def run(self):
         self._start_time = time.time()
 
-        scanner = WebScanner(self.target, session=self.custom_session)
+        scanner = WebScanner(self.target, session=self.custom_session, delay=self.delay)
         scanner.vuln_callback = self.vuln_found_signal.emit
 
         # Wrap the scanner's URL-by-URL progress so we

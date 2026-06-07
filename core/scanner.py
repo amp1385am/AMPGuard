@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import os
+import time
 
 from selenium.webdriver.support.expected_conditions import element_selection_state_to_be
 
@@ -13,6 +14,7 @@ class WebScanner:
         self.base_target = target
         self.target = target
         self.session = session if session is not None else requests.Session()
+        self.delay = delay
 
         self.session = requests.Session()
 
@@ -34,13 +36,9 @@ class WebScanner:
     # =====================================================
 
     def safe_get(self, url, params=None, headers=None):
+        time.sleep(self.delay)  # تأخیر قبل از هر درخواست
         try:
-            response = self.session.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=5
-            )
+            response = self.session.get(url, params=params, headers=headers, timeout=5)
             print(f"[HTTP] {url} -> {response.status_code}")
             return response
         except Exception as e:
@@ -48,13 +46,9 @@ class WebScanner:
             return None
 
     def safe_post(self, url, data=None, headers=None):
+        time.sleep(self.delay)
         try:
-            response = self.session.post(
-                url,
-                data=data,
-                headers=headers,
-                timeout=5
-            )
+            response = self.session.post(url, data=data, headers=headers, timeout=5)
             print(f"[HTTP POST] {url} -> {response.status_code}")
             return response
         except Exception as e:

@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QFrame, QListWidget, QStackedWidget,
     QTableWidget, QTableWidgetItem, QComboBox,
     QSizePolicy, QHeaderView, QDialog, QDialogButtonBox,
-    QScrollArea, QFormLayout
+    QScrollArea, QFormLayout, QDoubleSpinBox          # اضافه شده QDoubleSpinBox
 )
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QSettings
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
@@ -22,7 +22,7 @@ from core.xml_exporter import XMLExporter
 from datetime import datetime
 import os
 import webbrowser
-import requests   # اضافه شده برای ایجاد session
+import requests
 
 
 # ══════════════════════════════════════════════════════
@@ -143,7 +143,6 @@ class ChartWidget(FigureCanvas):
         "Low":      "#30d158",
     }
 
-    # رنگ‌های ثابت برای هر نوع آسیب‌پذیری (برای نمودار نوارهای افقی)
     TYPE_COLORS = {
         "SQL Injection":            "#ff2d55",
         "Reflected XSS":            "#ff6b35",
@@ -198,7 +197,6 @@ class ChartWidget(FigureCanvas):
         if type_counts:
             labels = list(type_counts.keys())
             values = list(type_counts.values())
-            # استفاده از رنگ ثابت برای هر نوع
             bar_colors = [self.TYPE_COLORS.get(l, "#00ff99") for l in labels]
             bars = ax_bar.barh(labels, values, color=bar_colors, height=0.55)
             ax_bar.set_xlabel("Count", color="#666", fontsize=9)
@@ -406,7 +404,7 @@ class RichTerminal(QTextEdit):
 
 
 # ══════════════════════════════════════════════════════
-#  MAIN WINDOW (با قابلیت احراز هویت)
+#  MAIN WINDOW (با احراز هویت + Rate Limiting)
 # ══════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
@@ -417,7 +415,7 @@ class MainWindow(QMainWindow):
         self.db = DatabaseManager()
         self.workers = []
         self.current_vulnerabilities = []
-        self.auth_config = {"type": "None"}   # مقدار پیش‌فرض
+        self.auth_config = {"type": "None"}
 
         self.setWindowTitle("AMPGuard")
         self.resize(1400, 900)
@@ -547,7 +545,7 @@ class MainWindow(QMainWindow):
 
         dash_layout.addLayout(mid_row)
 
-        # Vuln table — double-click opens popup
+        # Vuln table
         self.vuln_table = QTableWidget()
         self.vuln_table.setColumnCount(3)
         self.vuln_table.setHorizontalHeaderLabels(["Type", "URL", "Severity"])
@@ -653,7 +651,7 @@ class MainWindow(QMainWindow):
         self.apply_theme_button.setFixedHeight(36)
         settings_layout.addWidget(self.apply_theme_button)
 
-        # اضافه کردن بخش Authentication
+        # Authentication section
         auth_label = QLabel("Authentication")
         auth_label.setStyleSheet("color: #00ff99; font-size: 16px; margin-top: 20px;")
         settings_layout.addWidget(auth_label)
@@ -661,6 +659,26 @@ class MainWindow(QMainWindow):
         self.auth_button.setFixedHeight(36)
         settings_layout.addWidget(self.auth_button)
         self.auth_button.clicked.connect(self.open_auth_dialog)
+
+        # ── NEW: Rate Limiting section ─────────────────
+        rate_label = QLabel("Rate Limiting")
+        rate_label.setStyleSheet("color: #00ff99; font-size: 16px; margin-top: 20px;")
+        settings_layout.addWidget(rate_label)
+
+        delay_layout = QHBoxLayout()
+        delay_layout.addWidget(QLabel("Delay between requests (seconds):"))
+        self.delay_spinbox = QDoubleSpinBox()
+        self.delay_spinbox.setRange(0.0, 5.0)
+        self.delay_spinbox.setSingleStep(0.1)
+        self.delay_spinbox.setValue(0.2)
+        self.delay_spinbox.setSuffix(" s")
+        delay_layout.addWidget(self.delay_spinbox)
+        delay_layout.addStretch()
+        settings_layout.addLayout(delay_layout)
+
+        info_label = QLabel("💡 Lower delay = faster scan, higher risk of being blocked. Recommended: 0.2–0.5 s")
+        info_label.setStyleSheet("color: #888; font-size: 11px; margin-left: 20px;")
+        settings_layout.addWidget(info_label)
 
         settings_layout.addStretch()
 
@@ -673,9 +691,12 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar_frame)
         main_layout.addWidget(self.pages, stretch=1)
 
+        # Load settings
         self.load_theme("cyber_dark.qss")
-        self.load_auth_settings()   # بارگذاری تنظیمات احراز هویت ذخیره شده
+        self.load_auth_settings()
+        self.load_rate_limiting_settings()
 
+        # Connect signals
         self.start_button.clicked.connect(self.start_scan)
         self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.open_report_button.clicked.connect(self.open_report)
@@ -684,6 +705,7 @@ class MainWindow(QMainWindow):
         self.severity_filter.currentTextChanged.connect(self.filter_vulnerabilities)
         self.toggle_sidebar_button.clicked.connect(self.toggle_sidebar)
         self.apply_theme_button.clicked.connect(self.change_theme)
+        self.delay_spinbox.valueChanged.connect(self.on_delay_changed)
 
         self.sidebar.setCurrentRow(0)
         self.sidebar_expanded = True
@@ -702,7 +724,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # ══════════════════════════════════════════════════
-    #  AUTHENTICATION (جدید)
+    #  AUTHENTICATION (بدون تغییر)
     # ══════════════════════════════════════════════════
 
     def open_auth_dialog(self):
@@ -717,9 +739,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(auth_type)
 
         stack = QStackedWidget()
-        # صفحه 0: None
         stack.addWidget(QWidget())
-        # صفحه 1: Basic Auth
         basic_widget = QWidget()
         basic_layout = QFormLayout(basic_widget)
         basic_user = QLineEdit()
@@ -728,7 +748,6 @@ class MainWindow(QMainWindow):
         basic_layout.addRow("Username:", basic_user)
         basic_layout.addRow("Password:", basic_pass)
         stack.addWidget(basic_widget)
-        # صفحه 2: Cookie string
         cookie_widget = QWidget()
         cookie_layout = QVBoxLayout(cookie_widget)
         cookie_edit = QTextEdit()
@@ -736,7 +755,6 @@ class MainWindow(QMainWindow):
         cookie_layout.addWidget(QLabel("Cookie header value (e.g., key1=value1; key2=value2):"))
         cookie_layout.addWidget(cookie_edit)
         stack.addWidget(cookie_widget)
-        # صفحه 3: Bearer Token
         token_widget = QWidget()
         token_layout = QVBoxLayout(token_widget)
         token_edit = QLineEdit()
@@ -748,17 +766,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(stack)
         auth_type.currentIndexChanged.connect(stack.setCurrentIndex)
 
-        # دکمه تست (اختیاری)
         test_btn = QPushButton("Test Connection (with target URL)")
         layout.addWidget(test_btn)
 
-        # دکمه‌های OK/Cancel
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
-        # نگهداری ارجاع به ویجت‌ها
         dialog.auth_type = auth_type
         dialog.basic_user = basic_user
         dialog.basic_pass = basic_pass
@@ -766,7 +781,6 @@ class MainWindow(QMainWindow):
         dialog.token_edit = token_edit
         dialog.test_btn = test_btn
 
-        # تست اتصال با استفاده از target وارد شده در صفحه اصلی
         def test_auth():
             target = self.url_input.text().strip()
             if not target:
@@ -816,7 +830,6 @@ class MainWindow(QMainWindow):
         return session
 
     def create_authenticated_session(self):
-        """ساخت session بر اساس auth_config جاری"""
         cfg = self.auth_config
         return self._create_session_from_config(
             cfg["type"],
@@ -830,7 +843,6 @@ class MainWindow(QMainWindow):
         settings = QSettings("AMPGuard", "Auth")
         settings.setValue("type", self.auth_config["type"])
         settings.setValue("basic_user", self.auth_config["basic"]["username"])
-        # رمز عبور را به صورت ساده ذخیره می‌کنیم (برای نمونه، بهتر است رمزگذاری شود)
         settings.setValue("basic_pass", self.auth_config["basic"]["password"])
         settings.setValue("cookie", self.auth_config["cookie"])
         settings.setValue("bearer", self.auth_config["bearer"])
@@ -848,7 +860,22 @@ class MainWindow(QMainWindow):
         }
 
     # ══════════════════════════════════════════════════
-    #  SCAN CONTROL (تغییر یافته)
+    #  RATE LIMITING (جدید)
+    # ══════════════════════════════════════════════════
+
+    def load_rate_limiting_settings(self):
+        settings = QSettings("AMPGuard", "App")
+        delay = float(settings.value("request_delay", 0.2))
+        self.request_delay = delay
+        self.delay_spinbox.setValue(delay)
+
+    def on_delay_changed(self, value):
+        self.request_delay = value
+        settings = QSettings("AMPGuard", "App")
+        settings.setValue("request_delay", value)
+
+    # ══════════════════════════════════════════════════
+    #  SCAN CONTROL (با ارسال delay)
     # ══════════════════════════════════════════════════
 
     def start_scan(self):
@@ -857,11 +884,12 @@ class MainWindow(QMainWindow):
             self.terminal.append_colored("[ERROR] Please enter a target URL.")
             return
 
-        # ساخت session احراز شده در صورت نیاز
         session = None
         if self.auth_config["type"] != "None":
             session = self.create_authenticated_session()
             self.terminal.append_colored(f"[SYSTEM] Using authentication: {self.auth_config['type']}")
+
+        self.terminal.append_colored(f"[SYSTEM] Rate limiting: {self.request_delay} s delay between requests")
 
         self.terminal.clear()
         self.vuln_table.setRowCount(0)
@@ -870,7 +898,7 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self._reset_cards()
 
-        self.worker = ScanWorker(target, session=session)   # ارسال session
+        self.worker = ScanWorker(target, session=session, delay=self.request_delay)
         self.worker.log_signal.connect(self.terminal.append_colored)
         self.worker.vuln_found_signal.connect(self.add_vuln_live)
         self.worker.progress_signal.connect(self.progress.setValue)
@@ -880,18 +908,19 @@ class MainWindow(QMainWindow):
 
     def start_multi_scan(self):
         targets = self.multi_target_input.toPlainText().splitlines()
-        # ساخت session یکسان برای همه (در صورت وجود)
         session = None
         if self.auth_config["type"] != "None":
             session = self.create_authenticated_session()
             self.terminal.append_colored(f"[SYSTEM] Using authentication for multi-scan: {self.auth_config['type']}")
+
+        self.terminal.append_colored(f"[SYSTEM] Rate limiting for multi-scan: {self.request_delay} s delay")
 
         for target in targets:
             target = target.strip()
             if not target:
                 continue
             self.terminal.append_colored(f"[MULTI] Starting scan: {target}")
-            w = ScanWorker(target, session=session)
+            w = ScanWorker(target, session=session, delay=self.request_delay)
             self.workers.append(w)
             w.log_signal.connect(self.terminal.append_colored)
             w.progress_signal.connect(self.progress.setValue)
@@ -900,7 +929,7 @@ class MainWindow(QMainWindow):
             w.start()
 
     # ══════════════════════════════════════════════════
-    #  VULN TABLE (بدون تغییر)
+    #  VULN TABLE و بقیه توابع (بدون تغییر)
     # ══════════════════════════════════════════════════
 
     SEVERITY_COLORS = {
@@ -915,8 +944,6 @@ class MainWindow(QMainWindow):
         row = self.vuln_table.rowCount()
         self.vuln_table.insertRow(row)
         self._set_row(row, vuln)
-
-        # Live update charts & stat cards
         self.chart.update_chart(self.current_vulnerabilities)
         self._update_cards_from_vulns()
 
@@ -928,8 +955,7 @@ class MainWindow(QMainWindow):
     def _set_row(self, row: int, vuln: dict):
         self.vuln_table.setItem(row, 0, QTableWidgetItem(vuln["type"]))
         self.vuln_table.setItem(row, 1, QTableWidgetItem(vuln["url"]))
-
-        sev  = vuln["severity"]
+        sev = vuln["severity"]
         item = QTableWidgetItem(f"  {sev}  ")
         item.setTextAlignment(Qt.AlignCenter)
         bg, fg = self.SEVERITY_COLORS.get(sev, ("#444", "#fff"))
@@ -943,7 +969,7 @@ class MainWindow(QMainWindow):
     def filter_vulnerabilities(self):
         if not self.current_vulnerabilities:
             return
-        q   = self.search_input.text().lower()
+        q = self.search_input.text().lower()
         sev = self.severity_filter.currentText()
         out = [
             v for v in self.current_vulnerabilities
@@ -972,23 +998,15 @@ class MainWindow(QMainWindow):
         self.ssrf_card.set_value(counts["ssrf"])
         self.csrf_card.set_value(counts["csrf"])
 
-    # ══════════════════════════════════════════════════
-    #  SCAN FINISHED
-    # ══════════════════════════════════════════════════
-
     def scan_finished(self, vulnerabilities: list):
         self.start_button.setEnabled(True)
         self.current_vulnerabilities = vulnerabilities
         self.terminal.append_colored("[SYSTEM] Scan completed successfully.")
-
         self._update_cards_from_vulns()
-
         scan_id = self.db.save_scan(self.url_input.text(), str(datetime.now()))
         for v in vulnerabilities:
             self.db.save_vulnerability(scan_id, v["type"], v["url"], v["severity"])
-
         target = self.url_input.text()
-
         for gen, tag in [
             (ReportGenerator.generate_json_report, "JSON"),
             (ReportGenerator.generate_html_report, "HTML"),
@@ -997,7 +1015,6 @@ class MainWindow(QMainWindow):
             path = gen(target, vulnerabilities)
             self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
             self.report_list.addItem(path)
-
         for exporter, tag in [
             (lambda t, v: CSVExporter.export(t, v),              "CSV"),
             (lambda t, v: MarkdownExporter.export(t, v),         "Markdown"),
@@ -1006,7 +1023,6 @@ class MainWindow(QMainWindow):
             path = exporter(target, vulnerabilities)
             self.terminal.append_colored(f"[REPORT] {tag} saved: {path}")
             self.report_list.addItem(path)
-
         self.fill_vulnerability_table(vulnerabilities)
         self.chart.update_chart(vulnerabilities)
         self.load_scan_history()
@@ -1068,4 +1084,4 @@ class MainWindow(QMainWindow):
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
