@@ -113,6 +113,17 @@ class VulnDetailDialog(QDialog):
             "Missing CSRF Token":     "Add a cryptographically random CSRF token to every state-changing POST form.",
             "Missing Security Header":"Add the missing HTTP security header to all responses.",
             "Interesting Endpoint":   "Review whether this endpoint should be publicly accessible.",
+            "Open Redirect": "مقادیر redirect رو با whitelist اعتبارسنجی کن. "
+            "هرگز URL کامل رو از input کاربر نگیر — فقط path رو قبول کن.",
+            "Open Redirect (Client-side)": "از window.location با مقادیر کاربر استفاده نکن. "
+               "مقصد redirect رو server-side اعتبارسنجی کن.",
+            "Host Header Injection": "برای ساخت URL (مثلاً در reset email) از HOST_URL ثابت در config استفاده کن. "
+                                     "هرگز از Host header برای ساخت لینک استفاده نکن.",
+            "Host Header Injection (X-Forwarded-Host)": "X-Forwarded-Host رو فقط از proxy های مورد اعتماد قبول کن. "
+                                                        "در config مشخص کن کدام IP ها trusted proxy هستن.",
+            "Password Reset Poisoning":
+                "URL ایمیل reset رو از یک متغیر ثابت در config بساز، "
+                "نه از Host header درخواست.",
         }
         hint = hints.get(vuln.get("type", ""), "Consult OWASP guidelines for remediation advice.")
         layout.addLayout(field("Remediation", hint))

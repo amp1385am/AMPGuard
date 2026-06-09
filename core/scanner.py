@@ -116,6 +116,8 @@ class WebScanner:
             self.check_lfi(log_callback)
             self.check_ssrf(log_callback)
             self.check_csrf(log_callback)
+            self.check_open_redirect(log_callback)
+            self.check_host_header_injection(log_callback)
 
         self.target = self.base_target
         self.directory_bruteforce(log_callback)
@@ -493,3 +495,213 @@ class WebScanner:
                     log_callback,
                     detail=f"HTTP {response.status_code}"
                 )
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  OPEN REDIRECT
+        # ══════════════════════════════════════════════════════════════════════
+
+    def check_open_redirect(self, log_callback):
+        """
+        دنبال پارامترهایی می‌گرده که مقدارشون رو مستقیم به Location هدر
+        می‌فرستن — اگه سرور با کد 3xx به evil.com ریدایرکت کرد، آسیب‌پذیره.
+        """
+        if log_callback:
+            log_callback(f"[INFO] Open Redirect check: {self.target}")
+
+        # پارامترهایی که معمولاً مقدار URL می‌گیرن
+        redirect_params = [
+            "redirect", "redirect_url", "redirect_uri", "return",
+            "return_url", "returnTo", "next", "url", "goto",
+            "continue", "destination", "dest", "target", "redir",
+            "r", "u", "link", "forward", "location", "back",
+        ]
+
+        # payloadها — ترکیب روش‌های مختلف bypass
+        payloads = [
+            "https://evil.com",
+            "//evil.com",
+            "//evil.com/",
+            "/\\evil.com",
+            "https:evil.com",
+            "/%09/evil.com",  # tab bypass
+            "//%09evil.com",
+            "https://evil%E3%80%82com",  # Unicode dot
+            "http://0/evil.com",
+            "https://evil.com%23@target.com",  # @ trick
+        ]
+
+        for param in redirect_params:
+            for payload in payloads:
+                response = self.safe_get(
+                    self.target,
+                    params={param: payload},
+                    # allow_redirects=False تا خود redirect رو ببینیم
+                )
+                if not response:
+                    continue
+
+                # بررسی ریدایرکت واقعی (3xx)
+                if response.history:
+                    for hist_resp in response.history:
+                        location = hist_resp.headers.get("Location", "")
+                        if "evil.com" in location:
+                            self.add_vuln(
+                                "Open Redirect",
+                                self.target,
+                                "High",
+                                log_callback,
+                                detail=(
+                                    f"GET ?{param}={payload} → "
+                                    f"HTTP {hist_resp.status_code} "
+                                    f"Location: {location}"
+                                )
+                            )
+                            return  # یک نمونه کافیه، بقیه رو رد کن
+
+                # بررسی meta refresh و JS redirect در body
+                body_lower = response.text.lower()
+                if "evil.com" in body_lower:
+                    if any(kw in body_lower for kw in [
+                        "meta http-equiv", "window.location",
+                        "document.location", "location.href",
+                        "location.replace"
+                    ]):
+                        self.add_vuln(
+                            "Open Redirect (Client-side)",
+                            self.target,
+                            "Medium",
+                            log_callback,
+                            detail=(
+                                f"GET ?{param}={payload} → "
+                                f"evil.com در JS/meta redirect پیدا شد"
+                            )
+                        )
+                        return
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  HOST HEADER INJECTION
+        # ══════════════════════════════════════════════════════════════════════
+
+    def check_host_header_injection(self, log_callback):
+        """
+        Host header رو با مقادیر مخرب می‌فرسته.
+        اگه سرور مقدار Host رو در response منعکس کنه یا ازش برای
+        ریدایرکت استفاده کنه — آسیب‌پذیره (password reset poisoning، cache poisoning).
+        """
+        if log_callback:
+            log_callback(f"[INFO] Host Header Injection check: {self.target}")
+
+        from urllib.parse import urlparse
+        real_host = urlparse(self.target).netloc  # مثلاً example.com
+
+        # تست ۱: جایگزینی کامل Host
+        injected_hosts = [
+            "evil.com",
+            f"evil.com#{real_host}",
+            f"{real_host}.evil.com",
+            f"evil.com@{real_host}",
+        ]
+
+        for fake_host in injected_hosts:
+            response = self.safe_get(
+                self.target,
+                headers={"Host": fake_host}
+            )
+            if not response:
+                continue
+
+            body = response.text
+            body_l = body.lower()
+
+            # آیا مقدار مخرب در body بازتاب داده شده؟
+            if fake_host in body or "evil.com" in body_l:
+                self.add_vuln(
+                    "Host Header Injection",
+                    self.target,
+                    "High",
+                    log_callback,
+                    detail=(
+                        f"Host: {fake_host} → "
+                        f"مقدار در response منعکس شد "
+                        f"(HTTP {response.status_code})"
+                    )
+                )
+                break
+
+            # آیا ریدایرکت به evil.com داده شده؟
+            if response.history:
+                location = response.history[-1].headers.get("Location", "")
+                if "evil.com" in location:
+                    self.add_vuln(
+                        "Host Header Injection → Open Redirect",
+                        self.target,
+                        "Critical",
+                        log_callback,
+                        detail=(
+                            f"Host: {fake_host} → "
+                            f"Redirect به {location}"
+                        )
+                    )
+                    break
+
+        # تست ۲: X-Forwarded-Host (proxy bypass)
+        forwarded_hosts = [
+            "evil.com",
+            f"{real_host}.evil.com",
+        ]
+
+        for fwd in forwarded_hosts:
+            response = self.safe_get(
+                self.target,
+                headers={
+                    "X-Forwarded-Host": fwd,
+                    "X-Host": fwd,  # برخی فریم‌ورک‌ها
+                    "X-Forwarded-Server": fwd,
+                }
+            )
+            if not response:
+                continue
+
+            if fwd in response.text or "evil.com" in response.text.lower():
+                self.add_vuln(
+                    "Host Header Injection (X-Forwarded-Host)",
+                    self.target,
+                    "High",
+                    log_callback,
+                    detail=(
+                        f"X-Forwarded-Host: {fwd} → "
+                        f"مقدار در response منعکس شد"
+                    )
+                )
+                break
+
+        # تست ۳: password reset poisoning simulation
+        # یک درخواست POST به /forgot-password یا /reset با Host مخرب
+        reset_paths = [
+            "/forgot-password", "/reset-password",
+            "/password/reset", "/account/forgot",
+            "/auth/forgot", "/user/forgot-password",
+        ]
+        from urllib.parse import urljoin
+        for path in reset_paths:
+            url = urljoin(self.target, path)
+            response = self.safe_post(
+                url,
+                data={"email": "test@test.com"},
+                headers={"Host": "evil.com"}
+            )
+            if not response:
+                continue
+            if response.status_code in [200, 302] and \
+                    "evil.com" in response.text:
+                self.add_vuln(
+                    "Password Reset Poisoning",
+                    self.target,
+                    "Critical",
+                    log_callback,
+                    detail=(
+                        f"POST {path} با Host: evil.com → "
+                        f"evil.com در response (HTTP {response.status_code})"
+                    )
+                )
+                break
