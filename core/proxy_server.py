@@ -1,22 +1,20 @@
 """
 core/proxy_server.py
 ────────────────────
-Lightweight intercepting HTTP proxy built on mitmproxy.
+Lightweight intercepting HTTP/HTTPS proxy built on mitmproxy.
 Runs on 127.0.0.1:8080 by default.
 
-Usage
------
-    from core.proxy_server import InterceptProxy
-    proxy = InterceptProxy(port=8080)
-    proxy.request_callback  = lambda flow_data: ...   # called for every request
-    proxy.response_callback = lambda flow_data: ...   # called for every response
-    proxy.start()   # non-blocking — launches asyncio loop in a daemon thread
-    proxy.stop()
+HTTPS support:
+    mitmproxy auto-generates a CA cert at first run.
+    Call InterceptProxy.ca_cert_path() to get the .pem path,
+    then show it to the user so they can install it in their browser/OS.
 """
 
 import asyncio
+import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Optional
 
 from mitmproxy import http, options
@@ -27,7 +25,7 @@ from mitmproxy.tools.dump import DumpMaster
 #  Flow data dict schema (passed to callbacks)
 # ──────────────────────────────────────────────────────
 # {
-#   "id":           str,        unique flow id
+#   "id":           str,
 #   "method":       str,
 #   "url":          str,
 #   "req_headers":  dict,
@@ -36,11 +34,12 @@ from mitmproxy.tools.dump import DumpMaster
 #   "resp_headers": dict,
 #   "resp_body":    str,
 #   "timestamp":    str,
+#   "is_https":     bool,
 # }
 
 
 def _flow_to_dict(flow: http.HTTPFlow) -> dict:
-    req = flow.request
+    req  = flow.request
     resp = flow.response
 
     req_body = ""
@@ -49,15 +48,15 @@ def _flow_to_dict(flow: http.HTTPFlow) -> dict:
     except Exception:
         pass
 
-    resp_body = ""
-    status = None
+    resp_body   = ""
+    status      = None
     resp_headers: dict = {}
     if resp:
         try:
             resp_body = resp.content.decode("utf-8", errors="replace")
         except Exception:
             pass
-        status = resp.status_code
+        status       = resp.status_code
         resp_headers = dict(resp.headers)
 
     return {
@@ -70,6 +69,7 @@ def _flow_to_dict(flow: http.HTTPFlow) -> dict:
         "resp_headers": resp_headers,
         "resp_body":    resp_body,
         "timestamp":    datetime.now().strftime("%H:%M:%S"),
+        "is_https":     req.pretty_url.startswith("https://"),
     }
 
 
@@ -84,12 +84,11 @@ class _ProxyAddon:
 
     def request(self, flow: http.HTTPFlow):
         data = _flow_to_dict(flow)
-        self._icp._flows[flow.id] = flow          # keep live reference
+        self._icp._flows[flow.id] = flow
 
         if self._icp.request_callback:
             self._icp.request_callback(data)
 
-        # Intercept mode: pause until caller calls resume() or drop()
         if self._icp.intercept_enabled:
             flow.intercept()
             self._icp._pending[flow.id] = flow
@@ -105,7 +104,20 @@ class _ProxyAddon:
 # ──────────────────────────────────────────────────────
 
 class InterceptProxy:
-    """Thread-safe intercepting HTTP proxy."""
+    """
+    Thread-safe intercepting HTTP/HTTPS proxy.
+
+    HTTPS quick-start
+    -----------------
+    1.  proxy = InterceptProxy(); proxy.start()
+    2.  cert  = proxy.ca_cert_path()          # ~/.mitmproxy/mitmproxy-ca-cert.pem
+    3.  Show cert path to the user and ask them to install it.
+    4.  Set browser/system proxy to 127.0.0.1:8080.
+    5.  HTTPS traffic is now decrypted and passed to callbacks.
+    """
+
+    # mitmproxy stores its CA under this directory by default
+    _MITMPROXY_DIR = Path.home() / ".mitmproxy"
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8080):
         self.host = host
@@ -123,6 +135,57 @@ class InterceptProxy:
         self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
 
+    # ── CA cert helpers ────────────────────────────
+
+    @classmethod
+    def ca_cert_path(cls) -> Optional[Path]:
+        """
+        Return the path to mitmproxy's CA cert (.pem) if it exists.
+        The file is created on the first proxy run.
+        """
+        p = cls._MITMPROXY_DIR / "mitmproxy-ca-cert.pem"
+        return p if p.exists() else None
+
+    @classmethod
+    def ca_cert_exists(cls) -> bool:
+        return cls.ca_cert_path() is not None
+
+    @classmethod
+    def install_instructions(cls) -> dict[str, str]:
+        """
+        Return per-platform install instructions for the CA cert.
+        Used by the GUI to show the user what to do.
+        """
+        p = str(cls.ca_cert_path() or cls._MITMPROXY_DIR / "mitmproxy-ca-cert.pem")
+        return {
+            "Windows": (
+                f"1. Open: {p}\n"
+                "2. Click 'Install Certificate'\n"
+                "3. Choose 'Local Machine' → 'Trusted Root Certification Authorities'\n"
+                "4. Restart your browser."
+            ),
+            "macOS": (
+                f"1. Double-click: {p}\n"
+                "2. Keychain Access opens — add to 'System' keychain.\n"
+                "3. Find 'mitmproxy' cert → Get Info → Trust → 'Always Trust'.\n"
+                "4. Restart your browser."
+            ),
+            "Linux (Chrome/Chromium)": (
+                "Open chrome://settings/certificates → Authorities → Import\n"
+                f"Select: {p}\n"
+                "Check 'Trust this certificate for identifying websites'."
+            ),
+            "Linux (Firefox)": (
+                "Open about:preferences#privacy → View Certificates → Authorities → Import\n"
+                f"Select: {p}"
+            ),
+            "Firefox (any OS)": (
+                "about:preferences#privacy → View Certificates → Authorities → Import\n"
+                f"Select: {p}\n"
+                "Note: Firefox uses its own cert store — install here even if OS store is done."
+            ),
+        }
+
     # ── lifecycle ──────────────────────────────────
 
     def start(self):
@@ -139,31 +202,24 @@ class InterceptProxy:
     # ── flow control ───────────────────────────────
 
     def resume_flow(self, flow_id: str):
-        """Forward an intercepted request as-is."""
         flow = self._pending.pop(flow_id, None)
         if flow:
             flow.resume()
 
     def drop_flow(self, flow_id: str):
-        """Drop an intercepted request."""
         flow = self._pending.pop(flow_id, None)
         if flow:
             flow.kill()
 
     def modify_and_resume(self, flow_id: str,
-                          method: str = None,
-                          url: str = None,
-                          headers: dict = None,
-                          body: str = None):
-        """Edit a pending flow then forward it."""
+                          method: str = None, url: str = None,
+                          headers: dict = None, body: str = None):
         flow = self._pending.pop(flow_id, None)
         if not flow:
             return
         req = flow.request
-        if method:
-            req.method = method
-        if url:
-            req.url = url
+        if method:  req.method = method
+        if url:     req.url    = url
         if headers:
             req.headers.clear()
             req.headers.update(headers)
@@ -172,14 +228,8 @@ class InterceptProxy:
         flow.resume()
 
     def replay(self, flow_id: str,
-               method: str = None,
-               url: str = None,
-               headers: dict = None,
-               body: str = None):
-        """
-        Replay a completed flow (optionally with edits).
-        Sends the request directly via requests and fires response_callback.
-        """
+               method: str = None, url: str = None,
+               headers: dict = None, body: str = None):
         import requests as req_lib
 
         orig = self._flows.get(flow_id)
@@ -193,8 +243,8 @@ class InterceptProxy:
 
         try:
             resp = req_lib.request(
-                _method, _url, headers=_headers, data=_body, timeout=10,
-                verify=False, allow_redirects=False
+                _method, _url, headers=_headers, data=_body,
+                timeout=10, verify=False, allow_redirects=False
             )
             data = {
                 "id":           flow_id + "_replay",
@@ -206,6 +256,7 @@ class InterceptProxy:
                 "resp_headers": dict(resp.headers),
                 "resp_body":    resp.text[:4000],
                 "timestamp":    datetime.now().strftime("%H:%M:%S"),
+                "is_https":     _url.startswith("https://"),
             }
             if self.response_callback:
                 self.response_callback(data)
@@ -218,24 +269,26 @@ class InterceptProxy:
                     "status": None, "resp_headers": {},
                     "resp_body": f"Replay error: {e}",
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "is_https": _url.startswith("https://"),
                 })
 
     # ── internal ───────────────────────────────────
 
     def _run(self):
+        async def _main():
+            opts = options.Options(
+                listen_host=self.host,
+                listen_port=self.port,
+                ssl_insecure=True,
+                confdir=str(self._MITMPROXY_DIR),
+            )
+            self._master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+            self._master.addons.add(_ProxyAddon(self))
+            await self._master.run()
+
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-
-        opts = options.Options(
-            listen_host=self.host,
-            listen_port=self.port,
-            ssl_insecure=True,
-        )
-
-        self._master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-        self._master.addons.add(_ProxyAddon(self))
-
         try:
-            self._loop.run_until_complete(self._master.run())
+            self._loop.run_until_complete(_main())
         except Exception:
             pass

@@ -1,5 +1,3 @@
-from tokenize import tabsize
-
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLineEdit, QLabel,
@@ -20,6 +18,8 @@ from core.database import DatabaseManager
 from core.csv_exporter import CSVExporter
 from core.md_exporter import MarkdownExporter
 from core.xml_exporter import XMLExporter
+from core.api_scanner import APIScanner
+from core.proxy_worker import ProxyWorker
 
 from datetime import datetime
 import os
@@ -431,7 +431,7 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────
         self.sidebar = QListWidget()
         self.sidebar.setFixedWidth(220)
-        for item in ["🛡  Dashboard", "⚡  Scanner", "📄  Reports", "⚙  Settings"]:
+        for item in ["🛡  Dashboard", "⚡  Scanner", "📄  Reports", "⚙  Settings","🔀  Proxy"]:
             self.sidebar.addItem(item)
         self.sidebar.setStyleSheet("""
             QListWidget {
@@ -621,6 +621,125 @@ class MainWindow(QMainWindow):
         tabs.addTab(api_widget, "🔌 REST API")
         scanner_layout.addWidget(tabs)
 
+        # ── Proxy page ────────────────────────────────────────
+        proxy_page = QWidget()
+        proxy_layout = QVBoxLayout(proxy_page)
+        proxy_layout.setContentsMargins(20, 16, 20, 16)
+
+        proxy_title = QLabel("HTTP/HTTPS Intercepting Proxy")
+        proxy_title.setStyleSheet("color: #00ff99; font-size: 20px; font-weight: 700;")
+        proxy_layout.addWidget(proxy_title)
+
+        # ── Control bar ──────────────────────────────────────
+        proxy_ctrl = QHBoxLayout()
+
+        self.proxy_start_btn = QPushButton("▶  Start Proxy")
+        self.proxy_start_btn.setFixedHeight(36)
+        self.proxy_stop_btn = QPushButton("■  Stop Proxy")
+        self.proxy_stop_btn.setFixedHeight(36)
+        self.proxy_stop_btn.setEnabled(False)
+
+        self.intercept_btn = QPushButton("🔴  Intercept OFF")
+        self.intercept_btn.setFixedHeight(36)
+        self.intercept_btn.setCheckable(True)
+
+        self.proxy_status = QLabel("Proxy stopped")
+        self.proxy_status.setStyleSheet("color: #888; font-size: 12px;")
+
+        self.cert_btn = QPushButton("🔒  CA Cert Setup")
+        self.cert_btn.setFixedHeight(36)
+
+        proxy_ctrl.addWidget(self.proxy_start_btn)
+        proxy_ctrl.addWidget(self.proxy_stop_btn)
+        proxy_ctrl.addWidget(self.intercept_btn)
+        proxy_ctrl.addWidget(self.cert_btn)
+        proxy_ctrl.addWidget(self.proxy_status)
+        proxy_ctrl.addStretch()
+        proxy_layout.addLayout(proxy_ctrl)
+
+        # ── Flow table ────────────────────────────────────────
+        self.flow_table = QTableWidget()
+        self.flow_table.setColumnCount(5)
+        self.flow_table.setHorizontalHeaderLabels(["Time", "Method", "URL", "Status", "🔒"])
+        self.flow_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.flow_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.flow_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.flow_table.setShowGrid(False)
+        self.flow_table.verticalHeader().setVisible(False)
+        self.flow_table.setMaximumHeight(280)
+        self.flow_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #111;
+                alternate-background-color: #161616;
+                color: #ccc;
+                border: 1px solid #2a2a2a;
+                border-radius: 8px;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #1e1e1e;
+                color: #888; font-weight: 600;
+                font-size: 11px; padding: 6px 10px;
+                border: none; border-bottom: 1px solid #2a2a2a;
+            }
+            QTableWidget::item { padding: 5px 10px; }
+            QTableWidget::item:selected { background-color: #00ff9930; }
+        """)
+        self.flow_table.cellClicked.connect(self._on_flow_selected)
+        proxy_layout.addWidget(self.flow_table)
+
+        # ── Request / Response split view ─────────────────────
+        split_row = QHBoxLayout()
+        split_row.setSpacing(10)
+
+        req_frame = QVBoxLayout()
+        req_frame.addWidget(QLabel("Request"))
+        self.req_view = QTextEdit()
+        self.req_view.setReadOnly(True)
+        self.req_view.setFont(QFont("Courier New", 10))
+        self.req_view.setStyleSheet(
+            "background:#0d0d0d; color:#ccc; border:1px solid #2a2a2a; border-radius:6px; padding:6px;"
+        )
+        req_frame.addWidget(self.req_view)
+
+        resp_frame = QVBoxLayout()
+        resp_frame.addWidget(QLabel("Response"))
+        self.resp_view = QTextEdit()
+        self.resp_view.setReadOnly(True)
+        self.resp_view.setFont(QFont("Courier New", 10))
+        self.resp_view.setStyleSheet(
+            "background:#0d0d0d; color:#ccc; border:1px solid #2a2a2a; border-radius:6px; padding:6px;"
+        )
+        resp_frame.addWidget(self.resp_view)
+
+        split_row.addLayout(req_frame, stretch=1)
+        split_row.addLayout(resp_frame, stretch=1)
+        proxy_layout.addLayout(split_row)
+
+        # ── Intercept panel (نمایش فقط وقتی intercept فعاله) ──
+        self.intercept_panel = QFrame()
+        self.intercept_panel.setVisible(False)
+        self.intercept_panel.setStyleSheet(
+            "background:#1a1a00; border:1px solid #ffcc00; border-radius:8px; padding:8px;"
+        )
+        intercept_layout = QVBoxLayout(self.intercept_panel)
+        intercept_layout.addWidget(QLabel("⏸  Request paused — edit and forward or drop"))
+
+        self.intercept_editor = QTextEdit()
+        self.intercept_editor.setFont(QFont("Courier New", 10))
+        self.intercept_editor.setMinimumHeight(120)
+        intercept_layout.addWidget(self.intercept_editor)
+
+        intercept_btns = QHBoxLayout()
+        self.forward_btn = QPushButton("▶  Forward")
+        self.drop_btn = QPushButton("✖  Drop")
+        intercept_btns.addWidget(self.forward_btn)
+        intercept_btns.addWidget(self.drop_btn)
+        intercept_btns.addStretch()
+        intercept_layout.addLayout(intercept_btns)
+
+        proxy_layout.addWidget(self.intercept_panel)
+
 
 
         # ── Reports page ──────────────────────────────
@@ -707,6 +826,7 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(scanner_page)
         self.pages.addWidget(reports_page)
         self.pages.addWidget(settings_page)
+        self.pages.addWidget(proxy_page)
 
         main_layout.addWidget(sidebar_frame)
         main_layout.addWidget(self.pages, stretch=1)
@@ -726,6 +846,13 @@ class MainWindow(QMainWindow):
         self.toggle_sidebar_button.clicked.connect(self.toggle_sidebar)
         self.apply_theme_button.clicked.connect(self.change_theme)
         self.delay_spinbox.valueChanged.connect(self.on_delay_changed)
+        self.api_scan_button.clicked.connect(self.start_api_scan)
+        self.proxy_start_btn.clicked.connect(self.start_proxy)
+        self.proxy_stop_btn.clicked.connect(self.stop_proxy)
+        self.intercept_btn.toggled.connect(self.toggle_intercept)
+        self.forward_btn.clicked.connect(lambda: self._forward_intercepted())
+        self.drop_btn.clicked.connect(lambda: self._drop_intercepted())
+        self.cert_btn.clicked.connect(self.show_cert_dialog)
 
         self.sidebar.setCurrentRow(0)
         self.sidebar_expanded = True
@@ -1103,5 +1230,139 @@ class MainWindow(QMainWindow):
         self.load_theme(file)
         self.terminal.append_colored(f"[SYSTEM] Theme changed to {name}")
 
+    def start_api_scan(self):
+        self.terminal.append_colored("[DEBUG] API scan button clicked")  # پیام تست
+        base = self.api_base_url.text().strip()
+        if not base:
+            self.terminal.append_colored("[ERROR] Base URL required for API scan")
+            return
+        endpoints_text = self.api_endpoints.toPlainText().strip()
+        if not endpoints_text:
+            self.terminal.append_colored("[ERROR] Enter at least one endpoint")
+            return
+        endpoints = [line.strip() for line in endpoints_text.splitlines() if line.strip()]
+        self.terminal.append_colored(f"[DEBUG] Endpoints: {endpoints}")  # چاپ endpoints
+        session = self.create_authenticated_session() if self.auth_config["type"] != "None" else None
+        from core.api_scanner import APIScanner  # موقتاً اینجا import کنید تا مطمئن شوید
+        scanner = APIScanner(base, endpoints, session=session, delay=self.request_delay)
+        self.terminal.append_colored(f"[API] Starting scan on {base}")
+        vulns = scanner.scan(self.terminal.append_colored)
+        for v in vulns:
+            self.add_vuln_live(v)
+        self.terminal.append_colored(f"[API] Scan finished. Found {len(vulns)} vulnerabilities")
+
+    def start_proxy(self):
+        self.proxy_worker = ProxyWorker(host="127.0.0.1", port=8080)
+        self.proxy_worker.request_signal.connect(self._on_proxy_request)
+        self.proxy_worker.response_signal.connect(self._on_proxy_response)
+        self.proxy_worker.status_signal.connect(
+            lambda msg: self.proxy_status.setText(msg)
+        )
+        self.proxy_worker.start()
+        self.proxy_start_btn.setEnabled(False)
+        self.proxy_stop_btn.setEnabled(True)
+        self.proxy_status.setText("🟢  Proxy running on 127.0.0.1:8080")
+
+    def stop_proxy(self):
+        if hasattr(self, "proxy_worker"):
+            self.proxy_worker.stop_proxy()
+        self.proxy_start_btn.setEnabled(True)
+        self.proxy_stop_btn.setEnabled(False)
+        self.proxy_status.setText("Proxy stopped")
+
+    def toggle_intercept(self, checked: bool):
+        if hasattr(self, "proxy_worker"):
+            self.proxy_worker.set_intercept(checked)
+        label = "🔴  Intercept ON" if checked else "🔴  Intercept OFF"
+        self.intercept_btn.setText(label)
+
+    def _on_proxy_request(self, data: dict):
+        row = self.flow_table.rowCount()
+        self.flow_table.insertRow(row)
+        self.flow_table.setItem(row, 0, QTableWidgetItem(data["timestamp"]))
+        method_item = QTableWidgetItem(data["method"])
+        method_item.setForeground(QColor("#00ff99"))
+        self.flow_table.setItem(row, 1, method_item)
+        self.flow_table.setItem(row, 2, QTableWidgetItem(data["url"]))
+        self.flow_table.setItem(row, 3, QTableWidgetItem("…"))
+        https_item = QTableWidgetItem("🔒" if data.get("is_https") else "")
+        https_item.setTextAlignment(Qt.AlignCenter)
+        self.flow_table.setItem(row, 4, https_item)
+        # store full data for detail view
+        self.flow_table.item(row, 2).setData(Qt.UserRole, data)
+
+    def _on_proxy_response(self, data: dict):
+        # آپدیت status code در جدول
+        for row in range(self.flow_table.rowCount()):
+            item = self.flow_table.item(row, 2)
+            if item and item.data(Qt.UserRole) and \
+                    item.data(Qt.UserRole).get("id") == data["id"]:
+                status = str(data.get("status", "?"))
+                status_item = QTableWidgetItem(status)
+                color = "#30d158" if str(status).startswith("2") else \
+                    "#ffd60a" if str(status).startswith("3") else "#ff453a"
+                status_item.setForeground(QColor(color))
+                self.flow_table.setItem(row, 3, status_item)
+                item.setData(Qt.UserRole, data)
+                break
+
+    def _on_flow_selected(self, row, col):
+        item = self.flow_table.item(row, 2)
+        if not item:
+            return
+        data = item.data(Qt.UserRole)
+        if not data:
+            return
+        # Request view
+        req_text = f"{data['method']} {data['url']}\n\n"
+        req_text += "\n".join(f"{k}: {v}" for k, v in data.get("req_headers", {}).items())
+        if data.get("req_body"):
+            req_text += f"\n\n{data['req_body']}"
+        self.req_view.setPlainText(req_text)
+        # Response view
+        resp_text = f"Status: {data.get('status', '—')}\n\n"
+        resp_text += "\n".join(f"{k}: {v}" for k, v in data.get("resp_headers", {}).items())
+        if data.get("resp_body"):
+            resp_text += f"\n\n{data['resp_body'][:2000]}"
+        self.resp_view.setPlainText(resp_text)
+
+    def show_cert_dialog(self):
+        """دیالوگ نصب CA cert برای HTTPS"""
+        from core.proxy_server import InterceptProxy
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HTTPS CA Certificate Setup")
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+
+        if not InterceptProxy.ca_cert_exists():
+            layout.addWidget(QLabel(
+                "⚠  CA cert هنوز ساخته نشده.\n"
+                "ابتدا Proxy رو Start کن، بعد دوباره بیا اینجا."
+            ))
+        else:
+            cert_path = str(InterceptProxy.ca_cert_path())
+            layout.addWidget(QLabel(f"📄  Cert location:\n{cert_path}"))
+            layout.addWidget(QLabel(""))
+
+            instructions = InterceptProxy.install_instructions()
+            tabs = QTabWidget()
+            for platform, text in instructions.items():
+                w = QTextEdit()
+                w.setReadOnly(True)
+                w.setPlainText(text)
+                w.setFont(QFont("Courier New", 10))
+                tabs.addTab(w, platform)
+            layout.addWidget(tabs)
+
+            copy_btn = QPushButton("📋  Copy cert path")
+            copy_btn.clicked.connect(
+                lambda: QApplication.clipboard().setText(cert_path)
+            )
+            layout.addWidget(copy_btn)
+
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(dialog.reject)
+        layout.addWidget(close)
+        dialog.exec()
 
 APP_VERSION = "0.4.5"
